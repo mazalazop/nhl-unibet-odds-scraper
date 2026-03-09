@@ -46,7 +46,7 @@ jobs:
           PW_TIMEOUT_MS: "45000"
           PW_SLOWMO_MS: "0"
         run: |
-          python3 scrapers/unibet_event_discovery_v1.py
+          python3 scrapers/unibet_event_discovery_v2.py
 
       - name: Upload discovery artifacts
         if: always()
