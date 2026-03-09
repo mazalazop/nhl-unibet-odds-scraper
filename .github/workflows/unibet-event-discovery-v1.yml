@@ -23,7 +23,7 @@ on:
 
 jobs:
   discovery:
-    runs-on: [self-hosted, macOS, X64]
+    runs-on: self-hosted
 
     steps:
       - name: Checkout repository
