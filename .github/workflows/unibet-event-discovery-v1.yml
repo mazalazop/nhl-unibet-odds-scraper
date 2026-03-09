@@ -1,14 +1,60 @@
-name: test-manuel
+name: unibet-event-discovery
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
+    inputs:
+      event_url:
+        description: "URL complète de la page event Unibet NHL"
+        required: true
+        type: string
+      headless:
+        description: "Lancer Chromium en headless"
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      max_candidates:
+        description: "Nombre max de sections candidates à tester"
+        required: true
+        default: "20"
+        type: string
 
 jobs:
-  test:
+  discovery:
     runs-on: [self-hosted, macOS, X64]
+
     steps:
-      - name: Test
-        run: echo "workflow visible OK"
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show Python version
+        run: python3 --version
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip3 install -r requirements.txt
+          python3 -m playwright install chromium
+
+      - name: Run event discovery
+        env:
+          UNIBET_EVENT_URL: ${{ inputs.event_url }}
+          PW_HEADLESS: ${{ inputs.headless }}
+          DISCOVERY_MAX_CANDIDATES: ${{ inputs.max_candidates }}
+          PW_TIMEOUT_MS: "45000"
+          PW_SLOWMO_MS: "0"
+        run: |
+          python3 scrapers/unibet_event_discovery_v1.py
+
+      - name: Upload discovery artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unibet-event-discovery-${{ github.run_number }}
+          path: artifacts/unibet_event_discovery/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: true
