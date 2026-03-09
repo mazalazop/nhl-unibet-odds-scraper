@@ -1,4 +1,4 @@
-name: unibet-event-discovery
+name: unibet-event-points-parser
 
 on:
   workflow_dispatch:
@@ -15,11 +15,6 @@ on:
         options:
           - "true"
           - "false"
-      max_candidates:
-        description: "Nombre max de sections candidates à tester"
-        required: true
-        default: "20"
-        type: string
 
 jobs:
   discovery:
@@ -38,22 +33,21 @@ jobs:
           pip3 install -r requirements.txt
           python3 -m playwright install chromium
 
-      - name: Run event discovery
+      - name: Run points parser
         env:
           UNIBET_EVENT_URL: ${{ inputs.event_url }}
           PW_HEADLESS: ${{ inputs.headless }}
-          DISCOVERY_MAX_CANDIDATES: ${{ inputs.max_candidates }}
           PW_TIMEOUT_MS: "45000"
           PW_SLOWMO_MS: "0"
         run: |
-          python3 scrapers/unibet_event_discovery_v2.py
+          python3 scrapers/unibet_event_points_parser_v1.py
 
-      - name: Upload discovery artifacts
+      - name: Upload parser artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: unibet-event-discovery-${{ github.run_number }}
-          path: artifacts/unibet_event_discovery_v2/
+          name: unibet-event-points-parser-${{ github.run_number }}
+          path: artifacts/unibet_event_points_parser_v1/
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
