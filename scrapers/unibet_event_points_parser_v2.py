@@ -8,7 +8,9 @@ from datetime import datetime
 from playwright.sync_api import sync_playwright
 
 
-START_MARKER = "NOMBRE DE POINTS DU JOUEUR"
+START_MARKER_FULL = "NOMBRE DE POINTS DU JOUEUR (PROLONGATIONS INCLUSES)"
+START_MARKER_SHORT = "NOMBRE DE POINTS DU JOUEUR"
+
 COOKIE_SELECTORS = [
     "button:has-text('Accepter')",
     "button:has-text('Tout accepter')",
@@ -17,22 +19,15 @@ COOKIE_SELECTORS = [
     "button:has-text('Accept')",
 ]
 
-SKIP_LINES = {
-    "Voir plus",
-    "Voir moins",
-    "1",
-    "2",
-    "3",
-    "ou plus",
-    "Créer ma sélection",
-}
-
 STOP_MARKETS = [
     "BUTEUR DOUBLE CHANCE",
     "LES 2 JOUEURS MARQUENT DANS LE MATCH",
     "TOTAL DE BUTS MARQUÉS PAR LE DUO",
     "TOTAL DE BUTS MARQUÉS PAR LE TRIO",
     "BUTEUR ET SON ÉQUIPE GAGNE",
+    "LE JOUEUR MARQUE 2 BUTS OU PLUS",
+    "BUTEUR CHANCE TRIPLE",
+    "LES 3 JOUEURS MARQUENT DANS LE MATCH",
     "ECART ENTRE ÉQUIPES",
     "TOTAL DE BUTS",
     "QUI MARQUERA LE 1ER BUT",
@@ -45,7 +40,18 @@ STOP_MARKETS = [
     "2E TIERS-TEMPS",
     "3E TIERS-TEMPS",
     "PROLONGATIONS OUI/NON",
+    "PASSEUR (PROLONGATIONS INCLUSES)",
 ]
+
+SKIP_LINES = {
+    "Voir plus",
+    "Voir moins",
+    "Créer ma sélection",
+    "1",
+    "2",
+    "3",
+    "ou plus",
+}
 
 LINE_LABELS = ["1+", "2+", "3+"]
 
@@ -121,62 +127,115 @@ def accept_cookies(page, logs):
 
 
 def get_match_teams(page):
+    try:
+        title = page.title()
+        m = re.search(r"Pariez sur (.+?) - (.+?) \|", title)
+        if m:
+            t1 = m.group(1).strip()
+            t2 = m.group(2).strip()
+            if t1 and t2:
+                return [t1, t2]
+    except Exception:
+        pass
+
     teams = []
     try:
         h1s = page.locator("h1")
-        count = min(h1s.count(), 5)
+        count = min(h1s.count(), 10)
         for i in range(count):
             txt = h1s.nth(i).inner_text(timeout=1000).strip()
             if txt and txt not in teams:
                 teams.append(txt)
     except Exception:
         pass
-    return teams[:2]
+
+    if len(teams) >= 2:
+        return teams[:2]
+
+    return []
+
+
+def inner_text_safe(loc):
+    try:
+        return re.sub(r"\s+", " ", loc.inner_text(timeout=800)).strip()
+    except Exception:
+        return ""
+
+
+def try_click_locator(loc, logs, label_hint):
+    try:
+        if not loc.is_visible(timeout=800):
+            return False, None
+        label = inner_text_safe(loc)
+        if not label:
+            return False, None
+        if len(label) > 120:
+            return False, None
+        if "Tigne Point" in label or label.lower().startswith("unibet n’est pas affilié"):
+            return False, None
+        loc.scroll_into_view_if_needed(timeout=2000)
+        loc.click(timeout=4000)
+        log(logs, f"clicked {label_hint}: {label}")
+        return True, label
+    except Exception:
+        return False, None
 
 
 def click_points_market(page, logs):
-    targets = [
-        "NOMBRE DE POINTS DU JOUEUR (PROLONGATIONS INCLUSES)",
-        "NOMBRE DE POINTS DU JOUEUR",
-        "Points",
-        "Point",
+    exact_targets = ["Points"]
+    strict_targets = [
+        START_MARKER_FULL,
+        START_MARKER_SHORT,
     ]
-    for text in targets:
-        locators = [
+
+    for text in exact_targets:
+        candidates = [
             page.get_by_text(text, exact=True),
-            page.get_by_text(text),
             page.locator(f"button:has-text('{text}')"),
             page.locator(f"a:has-text('{text}')"),
-            page.locator(f"div:has-text('{text}')"),
             page.locator(f"span:has-text('{text}')"),
+            page.locator(f"div:has-text('{text}')"),
         ]
-        for base in locators:
+        for base in candidates:
             try:
                 count = min(base.count(), 10)
             except Exception:
                 count = 0
             for i in range(count):
-                loc = base.nth(i)
-                try:
-                    if not loc.is_visible(timeout=800):
-                        continue
-                    label = re.sub(r"\s+", " ", loc.inner_text(timeout=800)).strip()
-                    loc.scroll_into_view_if_needed(timeout=2000)
-                    loc.click(timeout=4000)
-                    log(logs, f"clicked points market: {label}")
+                ok, label = try_click_locator(base.nth(i), logs, "points tab")
+                if ok:
                     wait_settle(page, 1200)
                     return label
-                except Exception:
-                    continue
+
+    for text in strict_targets:
+        candidates = [
+            page.get_by_text(text, exact=True),
+            page.locator(f"button:has-text('{text}')"),
+            page.locator(f"a:has-text('{text}')"),
+            page.locator(f"span:has-text('{text}')"),
+            page.locator(f"div:has-text('{text}')"),
+        ]
+        for base in candidates:
+            try:
+                count = min(base.count(), 10)
+            except Exception:
+                count = 0
+            for i in range(count):
+                ok, label = try_click_locator(base.nth(i), logs, "points market")
+                if ok:
+                    wait_settle(page, 1200)
+                    return label
+
     raise RuntimeError("Points market not clickable")
 
 
 def find_points_block(page, logs):
-    candidates = []
     patterns = [
+        re.compile(r"NOMBRE DE POINTS DU JOUEUR \(PROLONGATIONS INCLUSES\)", re.I),
         re.compile(r"NOMBRE DE POINTS DU JOUEUR", re.I),
-        re.compile(r"NOMBRE DE POINTS", re.I),
     ]
+    candidates = []
+
     for pattern in patterns:
         try:
             loc = page.locator("section, article, div").filter(has_text=pattern)
@@ -189,18 +248,27 @@ def find_points_block(page, logs):
             try:
                 if not item.is_visible(timeout=500):
                     continue
-                txt = re.sub(r"\s+", " ", item.inner_text(timeout=1000)).strip()
-                if len(txt) < 40 or len(txt) > 4000:
+                txt = item.inner_text(timeout=1000)
+                txt_clean = re.sub(r"\s+", " ", txt).strip()
+                if len(txt_clean) < 40 or len(txt_clean) > 2500:
                     continue
+
                 score = 0
-                if "NOMBRE DE POINTS DU JOUEUR" in txt.upper():
+                if START_MARKER_FULL in txt_clean.upper():
                     score += 5
-                if "VOIR PLUS" in txt.upper() or "VOIR MOINS" in txt.upper():
+                if START_MARKER_SHORT in txt_clean.upper():
+                    score += 4
+                if "VOIR PLUS" in txt_clean.upper() or "VOIR MOINS" in txt_clean.upper():
                     score += 3
-                if "1 OU PLUS" in txt.upper() or "1" in txt:
-                    score += 1
-                score += min(len(txt), 1500) / 1000
-                candidates.append((score, item, txt))
+                if "1 OU PLUS" in txt_clean.upper():
+                    score += 2
+                if "2 OU PLUS" in txt_clean.upper():
+                    score += 2
+                if "3 OU PLUS" in txt_clean.upper():
+                    score += 2
+                score += min(len(txt_clean), 1200) / 1000
+
+                candidates.append((score, item, txt_clean))
             except Exception:
                 continue
 
@@ -232,8 +300,10 @@ def click_see_more_in_points_block(block, page, logs):
                 try:
                     if not item.is_visible(timeout=500):
                         continue
+                    label = inner_text_safe(item)
+                    if label != "Voir plus":
+                        continue
                     item.scroll_into_view_if_needed(timeout=2000)
-                    label = item.inner_text(timeout=800).strip()
                     item.click(timeout=4000)
                     log(logs, f"clicked see more in points block: {label}")
                     wait_settle(page, 1500)
@@ -242,7 +312,7 @@ def click_see_more_in_points_block(block, page, logs):
                     continue
 
     try:
-        loc = page.get_by_text("Voir plus")
+        loc = page.get_by_text("Voir plus", exact=True)
         count = min(loc.count(), 10)
     except Exception:
         count = 0
@@ -252,8 +322,8 @@ def click_see_more_in_points_block(block, page, logs):
         try:
             if not item.is_visible(timeout=500):
                 continue
+            label = inner_text_safe(item)
             item.scroll_into_view_if_needed(timeout=2000)
-            label = item.inner_text(timeout=800).strip()
             item.click(timeout=4000)
             log(logs, f"clicked fallback see more: {label}")
             wait_settle(page, 1500)
@@ -274,19 +344,14 @@ def normalize_lines(text):
     return lines
 
 
-def is_decimal_odds(text):
-    return bool(re.fullmatch(r"\d{1,3}(?:[.,]\d{1,2})?", text))
-
-
 def is_upper_market_heading(text):
     if text in SKIP_LINES:
         return False
     if len(text) < 8:
         return False
-    if any(text.upper().startswith(x) for x in STOP_MARKETS):
-        return True
-    if re.fullmatch(r"[A-ZÀÂÄÇÉÈÊËÎÏÔÖÙÛÜŸ0-9 '\-&,/()]+", text) and text.upper() == text:
-        return True
+    for m in STOP_MARKETS:
+        if text.upper().startswith(m):
+            return True
     return False
 
 
@@ -295,7 +360,8 @@ def extract_points_market_only(full_body_text, logs):
     start_idx = None
 
     for i, line in enumerate(lines):
-        if START_MARKER in line.upper():
+        up = line.upper()
+        if START_MARKER_FULL in up or START_MARKER_SHORT in up:
             start_idx = i
             break
 
@@ -303,11 +369,11 @@ def extract_points_market_only(full_body_text, logs):
         raise RuntimeError("Points market start marker not found in body")
 
     selected = [lines[start_idx]]
+
     for i in range(start_idx + 1, len(lines)):
         line = lines[i]
         if i > start_idx + 1 and is_upper_market_heading(line):
-            if START_MARKER not in line.upper():
-                break
+            break
         selected.append(line)
 
     log(logs, f"points market lines isolated: {len(selected)}")
@@ -315,27 +381,30 @@ def extract_points_market_only(full_body_text, logs):
 
 
 def split_by_teams(lines, teams):
-    sections = {}
+    sections = {team: [] for team in teams}
     current_team = None
 
     for line in lines:
         if line in teams:
             current_team = line
-            sections.setdefault(current_team, [])
             continue
-        if current_team is not None:
+        if current_team:
             sections[current_team].append(line)
 
     return sections
 
 
+def is_decimal_odds(text):
+    return bool(re.fullmatch(r"\d{1,3}(?:[.,]\d{1,2})?", text))
+
+
 def clean_team_lines(lines):
-    cleaned = []
+    out = []
     for line in lines:
         if line in SKIP_LINES:
             continue
-        cleaned.append(line)
-    return cleaned
+        out.append(line)
+    return out
 
 
 def parse_team_rows(team, lines):
@@ -344,32 +413,34 @@ def parse_team_rows(team, lines):
     i = 0
 
     while i < len(tokens):
-        line = tokens[i]
+        token = tokens[i]
 
-        if line in SKIP_LINES:
+        if token in SKIP_LINES:
             i += 1
             continue
 
-        if is_upper_market_heading(line):
+        if is_upper_market_heading(token):
             break
 
-        if is_decimal_odds(line):
+        if is_decimal_odds(token):
             i += 1
             continue
 
-        player = line
+        player = token
         odds = []
         j = i + 1
 
-        while j < len(tokens) and len(odds) < 3:
+        while j < len(tokens):
             nxt = tokens[j]
             if is_decimal_odds(nxt):
                 odds.append(nxt.replace(",", "."))
                 j += 1
-                continue
-            break
+                if len(odds) == 3:
+                    break
+            else:
+                break
 
-        if len(odds) >= 1:
+        if odds:
             for idx, odd in enumerate(odds):
                 if idx >= len(LINE_LABELS):
                     break
@@ -391,6 +462,7 @@ def parse_team_rows(team, lines):
             continue
         seen.add(key)
         dedup.append(row)
+
     return dedup
 
 
@@ -439,6 +511,9 @@ def main():
             teams = get_match_teams(page)
             log(logs, f"teams detected: {teams}")
 
+            if len(teams) != 2:
+                raise RuntimeError(f"Could not detect exactly 2 teams, got: {teams}")
+
             clicked_market_label = click_points_market(page, logs)
             snapshot(page, out_dir, "after_points_click")
 
@@ -460,8 +535,7 @@ def main():
 
             parsed_rows = []
             for team in teams:
-                team_rows = parse_team_rows(team, sections.get(team, []))
-                parsed_rows.extend(team_rows)
+                parsed_rows.extend(parse_team_rows(team, sections.get(team, [])))
 
             write_json(out_dir / "points_market_rows_clean.json", parsed_rows)
 
