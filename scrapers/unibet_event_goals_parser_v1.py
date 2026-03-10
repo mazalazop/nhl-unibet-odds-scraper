@@ -19,7 +19,7 @@ BLOCK_LABEL_CANDIDATES = [
 
 
 def now_ts():
-    return datetime.now().strftime("%Y%m%d_%H:%M:%S")
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
 def log(msg: str):
