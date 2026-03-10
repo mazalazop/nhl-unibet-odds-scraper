@@ -1,0 +1,48 @@
+name: unibet-event-points-batch
+
+on:
+  workflow_dispatch:
+    inputs:
+      event_urls:
+        description: "URLs event Unibet séparées par virgules"
+        required: true
+        type: string
+      headless:
+        description: "Lancer en headless"
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  run-batch:
+    runs-on: self-hosted
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip3 install playwright
+          python3 -m playwright install chromium
+
+      - name: Run points batch
+        env:
+          UNIBET_EVENT_URLS: ${{ github.event.inputs.event_urls }}
+          PW_HEADLESS: ${{ github.event.inputs.headless }}
+        run: |
+          python3 scrapers/unibet_event_points_batch_runner.py
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unibet-event-points-batch
+          path: artifacts/
