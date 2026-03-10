@@ -54,3 +54,4 @@ jobs:
         with:
           name: unibet-event-points-batch
           path: artifacts/
+          retention-days: 7
