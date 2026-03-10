@@ -1,5 +1,7 @@
 import os
+import re
 import json
+import unicodedata
 from pathlib import Path
 from datetime import datetime
 
@@ -27,6 +29,45 @@ def load_rows(run_dir: Path):
     if not path.exists():
         return []
     return load_json(path)
+
+
+def slugify(text: str) -> str:
+    if not text:
+        return ""
+    text = unicodedata.normalize("NFKD", str(text))
+    text = text.encode("ascii", "ignore").decode("ascii")
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text)
+    text = re.sub(r"-+", "-", text).strip("-")
+    return text
+
+
+def normalize_name(text: str) -> str:
+    if not text:
+        return ""
+    text = unicodedata.normalize("NFKC", str(text)).casefold().strip()
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def parse_line_value(line_label):
+    if line_label is None:
+        return None
+    match = re.search(r"(\d+)", str(line_label))
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def build_record_key(bookmaker, event_url, team, player_name_norm, line_value):
+    return "|".join([
+        bookmaker or "",
+        event_url or "",
+        team or "",
+        player_name_norm or "",
+        "" if line_value is None else str(line_value),
+    ])
 
 
 def main():
@@ -70,8 +111,16 @@ def main():
             })
             continue
 
-        summary = load_json(summary_path)
-        rows = load_rows(run_dir)
+        try:
+            summary = load_json(summary_path)
+            rows = load_rows(run_dir)
+        except Exception as e:
+            rejected_rows.append({
+                "event_url": event_url,
+                "reason": "json_read_error",
+                "error": str(e)
+            })
+            continue
 
         if not rows:
             rejected_rows.append({
@@ -82,25 +131,58 @@ def main():
 
         home_team = teams[0] if len(teams) >= 1 else None
         away_team = teams[1] if len(teams) >= 2 else None
+        event_slug = slugify(summary.get("title") or event_url)
 
         for row in rows:
-            normalized_rows.append({
-                "scrape_batch_ts": acceptance.get("batch_ts"),
-                "scrape_normalized_ts": out_ts,
-                "bookmaker": BOOKMAKER,
-                "market_key": MARKET_KEY,
-                "market_label": MARKET_LABEL,
-                "event_url": event_url,
-                "event_title": summary.get("title"),
-                "home_team": home_team,
-                "away_team": away_team,
-                "team": row.get("team"),
-                "player_name_raw": row.get("player_name_raw"),
-                "line_label": row.get("line_label"),
-                "odds_raw": row.get("odds_raw"),
-                "odds_decimal": float(str(row.get("odds_raw")).replace(",", ".")),
-                "source_run_dir": run_dir_raw
-            })
+            try:
+                team = row.get("team")
+                player_name_raw = row.get("player_name_raw")
+                line_label = row.get("line_label")
+                odds_raw = row.get("odds_raw")
+
+                odds_decimal = float(str(odds_raw).replace(",", "."))
+                line_value = parse_line_value(line_label)
+                player_name_norm = normalize_name(player_name_raw)
+                team_norm = normalize_name(team)
+
+                record_key = build_record_key(
+                    BOOKMAKER,
+                    event_url,
+                    team_norm,
+                    player_name_norm,
+                    line_value
+                )
+
+                normalized_rows.append({
+                    "record_key": record_key,
+                    "scrape_batch_ts": acceptance.get("batch_ts"),
+                    "scrape_normalized_ts": out_ts,
+                    "bookmaker": BOOKMAKER,
+                    "market_key": MARKET_KEY,
+                    "market_label": MARKET_LABEL,
+                    "event_url": event_url,
+                    "event_slug": event_slug,
+                    "event_title": summary.get("title"),
+                    "home_team": home_team,
+                    "away_team": away_team,
+                    "team": team,
+                    "team_norm": team_norm,
+                    "player_name_raw": player_name_raw,
+                    "player_name_norm": player_name_norm,
+                    "line_label": line_label,
+                    "line_value": line_value,
+                    "odds_raw": str(odds_raw),
+                    "odds_decimal": odds_decimal,
+                    "source_run_dir": run_dir_raw
+                })
+            except Exception as e:
+                rejected_rows.append({
+                    "event_url": event_url,
+                    "run_dir": run_dir_raw,
+                    "reason": "row_normalization_error",
+                    "row": row,
+                    "error": str(e)
+                })
 
     final_payload = {
         "batch_ts": acceptance.get("batch_ts"),
