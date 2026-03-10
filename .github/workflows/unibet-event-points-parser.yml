@@ -40,14 +40,14 @@ jobs:
           PW_TIMEOUT_MS: "45000"
           PW_SLOWMO_MS: "0"
         run: |
-          python3 scrapers/unibet_event_points_parser_v2.py
+          python3 scrapers/unibet_event_points_parser_v3.py
 
       - name: Upload parser artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: unibet-event-points-parser-${{ github.run_number }}
-          path: artifacts/unibet_event_points_parser_v2/
+          path: artifacts/unibet_event_points_parser_v3/
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
