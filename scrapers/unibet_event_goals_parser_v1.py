@@ -7,11 +7,14 @@ from datetime import datetime
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 
-MARKET_LABEL_CANDIDATES = [
-    "NOMBRE DE BUTS DU JOUEUR (PROLONGATIONS INCLUSES)",
-    "NOMBRE DE BUTS DU JOUEUR",
-    "BUTS DU JOUEUR (PROLONGATIONS INCLUSES)",
-    "BUTS DU JOUEUR",
+TAB_LABEL_CANDIDATES = [
+    "Buteurs",
+    "Buteur",
+]
+
+BLOCK_LABEL_CANDIDATES = [
+    "BUTEUR (PROLONGATIONS INCLUSES)",
+    "BUTEUR",
 ]
 
 
@@ -73,7 +76,7 @@ def click_cookie_if_present(page):
     return None
 
 
-def click_market_tab(page, label: str):
+def click_label(page, label: str):
     candidates = [
         page.locator(f"text={label}"),
         page.get_by_text(label, exact=False),
@@ -84,16 +87,16 @@ def click_market_tab(page, label: str):
                 target = loc.first
                 if target.is_visible(timeout=3000):
                     target.click(timeout=5000)
-                    log(f"clicked market tab: {label}")
+                    log(f"clicked label: {label}")
                     return True
         except Exception:
             continue
     return False
 
 
-def click_first_matching_market_tab(page, labels):
+def click_first_matching_label(page, labels):
     for label in labels:
-        if click_market_tab(page, label):
+        if click_label(page, label):
             return label
     return None
 
@@ -105,6 +108,7 @@ def score_market_block(text: str, label: str):
         score += 10.0
     score += txt.count("voir plus") * 2.0
     score += len(re.findall(r"\b\d+(?:[.,]\d+)?\b", txt)) * 0.03
+    score += txt.count("buteur") * 0.5
     score += txt.count("+") * 0.2
     return score
 
@@ -124,7 +128,7 @@ def select_market_block(page, label: str):
     for sel in selectors:
         try:
             loc = page.locator(sel)
-            count = min(loc.count(), 200)
+            count = min(loc.count(), 250)
             for i in range(count):
                 item = loc.nth(i)
                 txt = safe_inner_text(item)
@@ -140,6 +144,42 @@ def select_market_block(page, label: str):
     if best is not None:
         log(f"market block selected score={best_score:.3f}")
     return best
+
+
+def select_first_matching_market_block(page, labels):
+    best_block = None
+    best_label = None
+    best_score = -1
+
+    selectors = [
+        "section",
+        "div",
+        "[class*='market']",
+        "[class*='Market']",
+        "[data-test]",
+    ]
+
+    for sel in selectors:
+        try:
+            loc = page.locator(sel)
+            count = min(loc.count(), 250)
+            for i in range(count):
+                item = loc.nth(i)
+                txt = safe_inner_text(item)
+                if not txt:
+                    continue
+                for label in labels:
+                    score = score_market_block(txt, label)
+                    if score > best_score:
+                        best_score = score
+                        best_block = item
+                        best_label = label
+        except Exception:
+            continue
+
+    if best_block is not None:
+        log(f"market block selected label={best_label} score={best_score:.3f}")
+    return best_label, best_block
 
 
 def click_all_see_more_in_block(block, max_rounds=6):
@@ -191,9 +231,19 @@ def is_decimal_odd(token: str):
     return bool(re.fullmatch(r"\d+(?:[.,]\d+)?", token))
 
 
-def is_line_label(token: str):
-    token = norm_spaces(token)
-    return bool(re.fullmatch(r"\d+\+", token))
+def is_goals_line_label(token: str):
+    token = norm_spaces(token).lower()
+    return token in {"buteur", "2 buts ou plus", "3 buts ou plus"}
+
+
+def map_goals_line_label(token: str):
+    token = norm_spaces(token).lower()
+    mapping = {
+        "buteur": "1+",
+        "2 buts ou plus": "2+",
+        "3 buts ou plus": "3+",
+    }
+    return mapping.get(token)
 
 
 def parse_rows_from_lines(lines, teams):
@@ -227,7 +277,9 @@ def parse_rows_from_lines(lines, teams):
             if maybe_line in teams:
                 break
 
-            if is_line_label(maybe_line) and (is_decimal_odd(maybe_odd) or maybe_odd == "-"):
+            if is_goals_line_label(maybe_line) and (is_decimal_odd(maybe_odd) or maybe_odd == "-"):
+                mapped_line = map_goals_line_label(maybe_line)
+
                 if maybe_odd == "-":
                     has_dash = True
                 else:
@@ -236,7 +288,8 @@ def parse_rows_from_lines(lines, teams):
                 current_player_rows.append({
                     "team": current_team,
                     "player_name_raw": player_name,
-                    "line_label": maybe_line,
+                    "line_label": mapped_line,
+                    "line_label_raw": maybe_line,
                     "odds_raw": maybe_odd,
                 })
                 j += 2
@@ -296,7 +349,8 @@ def main():
         final_url = None
         title = None
         teams = []
-        clicked_market_label = None
+        clicked_tab_label = None
+        selected_block_label = None
         see_more_clicks = 0
         remaining_see_more = -1
         isolated = []
@@ -321,22 +375,22 @@ def main():
             teams = extract_teams_from_title(title)
             log(f"teams detected: {teams}")
 
-            clicked_market_label = click_first_matching_market_tab(page, MARKET_LABEL_CANDIDATES)
-            if not clicked_market_label:
-                raise RuntimeError(f"market_tab_not_found: candidates={MARKET_LABEL_CANDIDATES}")
+            clicked_tab_label = click_first_matching_label(page, TAB_LABEL_CANDIDATES)
+            if not clicked_tab_label:
+                raise RuntimeError(f"market_tab_not_found: candidates={TAB_LABEL_CANDIDATES}")
 
             time.sleep(2.0)
 
-            block = select_market_block(page, clicked_market_label)
+            selected_block_label, block = select_first_matching_market_block(page, BLOCK_LABEL_CANDIDATES)
             if block is None:
-                raise RuntimeError("market_block_not_found")
+                raise RuntimeError(f"market_block_not_found: candidates={BLOCK_LABEL_CANDIDATES}")
 
             see_more_clicks = click_all_see_more_in_block(block)
 
             time.sleep(1.5)
-            block = select_market_block(page, clicked_market_label)
+            selected_block_label, block = select_first_matching_market_block(page, BLOCK_LABEL_CANDIDATES)
             if block is None:
-                raise RuntimeError("market_block_not_found_after_expand")
+                raise RuntimeError(f"market_block_not_found_after_expand: candidates={BLOCK_LABEL_CANDIDATES}")
 
             block_text = safe_inner_text(block)
             remaining_see_more = remaining_see_more_in_block(block)
@@ -357,8 +411,10 @@ def main():
                 "final_url": final_url,
                 "cookie_clicked": cookie_clicked,
                 "teams": teams,
-                "clicked_market_label": clicked_market_label,
-                "market_label_candidates": MARKET_LABEL_CANDIDATES,
+                "clicked_tab_label": clicked_tab_label,
+                "tab_label_candidates": TAB_LABEL_CANDIDATES,
+                "selected_block_label": selected_block_label,
+                "block_label_candidates": BLOCK_LABEL_CANDIDATES,
                 "see_more_clicks": see_more_clicks,
                 "remaining_see_more_in_market": remaining_see_more,
                 "is_complete_market": remaining_see_more == 0,
