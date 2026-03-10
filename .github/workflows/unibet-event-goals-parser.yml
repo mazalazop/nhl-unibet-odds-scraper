@@ -1,0 +1,51 @@
+name: unibet-event-goals-parser
+
+on:
+  workflow_dispatch:
+    inputs:
+      event_url:
+        description: "URL event Unibet"
+        required: true
+        type: string
+      headless:
+        description: "Lancer en headless"
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  run-goals-parser:
+    runs-on: self-hosted
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Debug Python
+        run: |
+          which python3 || true
+          python3 --version || true
+          which pip3 || true
+          pip3 --version || true
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip3 install playwright
+          python3 -m playwright install chromium
+
+      - name: Run goals parser
+        env:
+          UNIBET_EVENT_URL: ${{ github.event.inputs.event_url }}
+          PW_HEADLESS: ${{ github.event.inputs.headless }}
+        run: |
+          python3 scrapers/unibet_event_goals_parser_v1.py
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unibet-event-goals-parser
+          path: artifacts/
+          retention-days: 7
