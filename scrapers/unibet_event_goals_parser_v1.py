@@ -7,7 +7,12 @@ from datetime import datetime
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 
-MARKET_LABEL = "NOMBRE DE BUTS DU JOUEUR (PROLONGATIONS INCLUSES)"
+MARKET_LABEL_CANDIDATES = [
+    "NOMBRE DE BUTS DU JOUEUR (PROLONGATIONS INCLUSES)",
+    "NOMBRE DE BUTS DU JOUEUR",
+    "BUTS DU JOUEUR (PROLONGATIONS INCLUSES)",
+    "BUTS DU JOUEUR",
+]
 
 
 def now_ts():
@@ -84,6 +89,13 @@ def click_market_tab(page, label: str):
         except Exception:
             continue
     return False
+
+
+def click_first_matching_market_tab(page, labels):
+    for label in labels:
+        if click_market_tab(page, label):
+            return label
+    return None
 
 
 def score_market_block(text: str, label: str):
@@ -284,6 +296,7 @@ def main():
         final_url = None
         title = None
         teams = []
+        clicked_market_label = None
         see_more_clicks = 0
         remaining_see_more = -1
         isolated = []
@@ -308,20 +321,20 @@ def main():
             teams = extract_teams_from_title(title)
             log(f"teams detected: {teams}")
 
-            clicked = click_market_tab(page, MARKET_LABEL)
-            if not clicked:
-                raise RuntimeError(f"market_tab_not_found: {MARKET_LABEL}")
+            clicked_market_label = click_first_matching_market_tab(page, MARKET_LABEL_CANDIDATES)
+            if not clicked_market_label:
+                raise RuntimeError(f"market_tab_not_found: candidates={MARKET_LABEL_CANDIDATES}")
 
             time.sleep(2.0)
 
-            block = select_market_block(page, MARKET_LABEL)
+            block = select_market_block(page, clicked_market_label)
             if block is None:
                 raise RuntimeError("market_block_not_found")
 
             see_more_clicks = click_all_see_more_in_block(block)
 
             time.sleep(1.5)
-            block = select_market_block(page, MARKET_LABEL)
+            block = select_market_block(page, clicked_market_label)
             if block is None:
                 raise RuntimeError("market_block_not_found_after_expand")
 
@@ -344,7 +357,8 @@ def main():
                 "final_url": final_url,
                 "cookie_clicked": cookie_clicked,
                 "teams": teams,
-                "clicked_market_label": MARKET_LABEL,
+                "clicked_market_label": clicked_market_label,
+                "market_label_candidates": MARKET_LABEL_CANDIDATES,
                 "see_more_clicks": see_more_clicks,
                 "remaining_see_more_in_market": remaining_see_more,
                 "is_complete_market": remaining_see_more == 0,
