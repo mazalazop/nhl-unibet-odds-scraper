@@ -22,10 +22,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+      - name: Debug Python
+        run: |
+          which python3 || true
+          python3 --version || true
+          which pip3 || true
+          pip3 --version || true
 
       - name: Install dependencies
         run: |
