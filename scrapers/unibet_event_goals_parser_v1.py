@@ -1,0 +1,370 @@
+import os
+import re
+import json
+import time
+from pathlib import Path
+from datetime import datetime
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+
+
+MARKET_LABEL = "NOMBRE DE BUTS DU JOUEUR (PROLONGATIONS INCLUSES)"
+
+
+def now_ts():
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def log(msg: str):
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+
+
+def ensure_dir(path: Path):
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def write_text(path: Path, content: str):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def write_json(path: Path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def norm_spaces(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip())
+
+
+def extract_teams_from_title(title: str):
+    m = re.search(r"Pariez sur (.*?) - (.*?) \| Hockey sur Glace \| Unibet\.fr", title or "", re.I)
+    if not m:
+        return []
+    return [norm_spaces(m.group(1)), norm_spaces(m.group(2))]
+
+
+def safe_inner_text(locator):
+    try:
+        return locator.inner_text(timeout=1000)
+    except Exception:
+        return ""
+
+
+def click_cookie_if_present(page):
+    selectors = [
+        "button:has-text('Accepter')",
+        "button:has-text('Tout accepter')",
+        "button:has-text('J'accepte')",
+    ]
+    for sel in selectors:
+        try:
+            btn = page.locator(sel).first
+            if btn.is_visible(timeout=1500):
+                btn.click(timeout=2000)
+                log(f"cookie clicked: {sel}")
+                return sel
+        except Exception:
+            continue
+    return None
+
+
+def click_market_tab(page, label: str):
+    candidates = [
+        page.locator(f"text={label}"),
+        page.get_by_text(label, exact=False),
+    ]
+    for loc in candidates:
+        try:
+            if loc.count() > 0:
+                target = loc.first
+                if target.is_visible(timeout=3000):
+                    target.click(timeout=5000)
+                    log(f"clicked market tab: {label}")
+                    return True
+        except Exception:
+            continue
+    return False
+
+
+def score_market_block(text: str, label: str):
+    score = 0.0
+    txt = norm_spaces(text).lower()
+    if label.lower() in txt:
+        score += 10.0
+    score += txt.count("voir plus") * 2.0
+    score += len(re.findall(r"\b\d+(?:[.,]\d+)?\b", txt)) * 0.03
+    score += txt.count("+") * 0.2
+    return score
+
+
+def select_market_block(page, label: str):
+    selectors = [
+        "section",
+        "div",
+        "[class*='market']",
+        "[class*='Market']",
+        "[data-test]",
+    ]
+
+    best = None
+    best_score = -1
+
+    for sel in selectors:
+        try:
+            loc = page.locator(sel)
+            count = min(loc.count(), 200)
+            for i in range(count):
+                item = loc.nth(i)
+                txt = safe_inner_text(item)
+                if not txt:
+                    continue
+                score = score_market_block(txt, label)
+                if score > best_score:
+                    best_score = score
+                    best = item
+        except Exception:
+            continue
+
+    if best is not None:
+        log(f"market block selected score={best_score:.3f}")
+    return best
+
+
+def click_all_see_more_in_block(block, max_rounds=6):
+    total_clicks = 0
+    for round_idx in range(1, max_rounds + 1):
+        clicked_this_round = 0
+        try:
+            buttons = block.locator("button")
+            count = buttons.count()
+            for i in range(count):
+                btn = buttons.nth(i)
+                txt = norm_spaces(safe_inner_text(btn)).lower()
+                if "voir plus" not in txt:
+                    continue
+                try:
+                    btn.click(timeout=3000)
+                    clicked_this_round += 1
+                    total_clicks += 1
+                    log(f"clicked see more in goals block #{total_clicks}")
+                    time.sleep(0.8)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        log(f"see more round {round_idx}: clicked={clicked_this_round}")
+        if clicked_this_round == 0:
+            break
+        time.sleep(1.0)
+
+    log(f"total see more clicks in goals block: {total_clicks}")
+    return total_clicks
+
+
+def remaining_see_more_in_block(block):
+    try:
+        txt = safe_inner_text(block).lower()
+        return txt.count("voir plus")
+    except Exception:
+        return -1
+
+
+def isolate_lines(block_text: str):
+    raw_lines = [norm_spaces(x) for x in block_text.splitlines()]
+    return [x for x in raw_lines if x]
+
+
+def is_decimal_odd(token: str):
+    return bool(re.fullmatch(r"\d+(?:[.,]\d+)?", token))
+
+
+def is_line_label(token: str):
+    token = norm_spaces(token)
+    return bool(re.fullmatch(r"\d+\+", token))
+
+
+def parse_rows_from_lines(lines, teams):
+    rows = []
+    debug_players = []
+
+    current_team = None
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+
+        if line in teams:
+            current_team = line
+            i += 1
+            continue
+
+        if not current_team:
+            i += 1
+            continue
+
+        player_name = line
+        j = i + 1
+        current_player_rows = []
+        odds_values = []
+        has_dash = False
+
+        while j + 1 < len(lines):
+            maybe_line = lines[j]
+            maybe_odd = lines[j + 1]
+
+            if maybe_line in teams:
+                break
+
+            if is_line_label(maybe_line) and (is_decimal_odd(maybe_odd) or maybe_odd == "-"):
+                if maybe_odd == "-":
+                    has_dash = True
+                else:
+                    odds_values.append(maybe_odd)
+
+                current_player_rows.append({
+                    "team": current_team,
+                    "player_name_raw": player_name,
+                    "line_label": maybe_line,
+                    "odds_raw": maybe_odd,
+                })
+                j += 2
+                continue
+
+            break
+
+        if current_player_rows:
+            valid_rows = [r for r in current_player_rows if r["odds_raw"] != "-"]
+            rows.extend(valid_rows)
+            debug_players.append({
+                "team": current_team,
+                "player_name_raw": player_name,
+                "odds_count": len(odds_values),
+                "has_dash": has_dash,
+                "odds_values": odds_values,
+            })
+            i = j
+            continue
+
+        i += 1
+
+    return rows, debug_players
+
+
+def validate_rows(rows):
+    if not rows:
+        return False, "no_rows"
+    for row in rows:
+        if not row.get("team"):
+            return False, "missing_team"
+        if not row.get("player_name_raw"):
+            return False, "missing_player"
+        if not row.get("line_label"):
+            return False, "missing_line_label"
+        if not row.get("odds_raw"):
+            return False, "missing_odds_raw"
+    return True, "ok"
+
+
+def main():
+    event_url = os.getenv("UNIBET_EVENT_URL", "").strip()
+    headless = os.getenv("PW_HEADLESS", "true").lower() == "true"
+
+    if not event_url:
+        raise ValueError("UNIBET_EVENT_URL is required")
+
+    run_dir = Path("artifacts") / "unibet_event_goals_parser_v1" / now_ts()
+    ensure_dir(run_dir)
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=headless)
+        context = browser.new_context(viewport={"width": 1600, "height": 2200})
+        page = context.new_page()
+
+        cookie_clicked = None
+        final_url = None
+        title = None
+        teams = []
+        see_more_clicks = 0
+        remaining_see_more = -1
+        isolated = []
+        rows = []
+        debug_players = []
+
+        try:
+            log(f"goto: {event_url}")
+            page.goto(event_url, wait_until="domcontentloaded", timeout=60000)
+            time.sleep(2.0)
+
+            cookie_clicked = click_cookie_if_present(page)
+            time.sleep(1.0)
+
+            try:
+                page.wait_for_load_state("networkidle", timeout=10000)
+            except PlaywrightTimeoutError:
+                pass
+
+            final_url = page.url
+            title = page.title()
+            teams = extract_teams_from_title(title)
+            log(f"teams detected: {teams}")
+
+            clicked = click_market_tab(page, MARKET_LABEL)
+            if not clicked:
+                raise RuntimeError(f"market_tab_not_found: {MARKET_LABEL}")
+
+            time.sleep(2.0)
+
+            block = select_market_block(page, MARKET_LABEL)
+            if block is None:
+                raise RuntimeError("market_block_not_found")
+
+            see_more_clicks = click_all_see_more_in_block(block)
+
+            time.sleep(1.5)
+            block = select_market_block(page, MARKET_LABEL)
+            if block is None:
+                raise RuntimeError("market_block_not_found_after_expand")
+
+            block_text = safe_inner_text(block)
+            remaining_see_more = remaining_see_more_in_block(block)
+
+            isolated = isolate_lines(block_text)
+            rows, debug_players = parse_rows_from_lines(isolated, teams)
+
+            rows_valid, rows_validation_reason = validate_rows(rows)
+
+            write_text(run_dir / "goals_market_only.txt", block_text)
+            write_json(run_dir / "goals_market_isolated_lines.json", isolated)
+            write_json(run_dir / "goals_market_rows_clean.json", rows)
+            write_json(run_dir / "goals_market_players_debug.json", debug_players)
+
+            summary = {
+                "title": title,
+                "event_url": event_url,
+                "final_url": final_url,
+                "cookie_clicked": cookie_clicked,
+                "teams": teams,
+                "clicked_market_label": MARKET_LABEL,
+                "see_more_clicks": see_more_clicks,
+                "remaining_see_more_in_market": remaining_see_more,
+                "is_complete_market": remaining_see_more == 0,
+                "rows_valid": rows_valid,
+                "rows_validation_reason": rows_validation_reason,
+                "isolated_lines": len(isolated),
+                "parsed_rows_clean": len(rows),
+                "players_seen": len(debug_players),
+                "players_with_3_odds": sum(1 for x in debug_players if x["odds_count"] == 3),
+                "players_with_less_than_3_odds": sum(1 for x in debug_players if x["odds_count"] < 3),
+                "players_with_dash": sum(1 for x in debug_players if x["has_dash"]),
+                "run_dir": str(run_dir),
+            }
+            write_json(run_dir / "summary.json", summary)
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+        finally:
+            context.close()
+            browser.close()
+
+
+if __name__ == "__main__":
+    main()
