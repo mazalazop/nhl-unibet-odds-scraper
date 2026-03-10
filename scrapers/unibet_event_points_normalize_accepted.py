@@ -9,6 +9,8 @@ from datetime import datetime
 BOOKMAKER = "unibet_fr"
 MARKET_KEY = "player_points_including_ot"
 MARKET_LABEL = "NOMBRE DE POINTS DU JOUEUR (PROLONGATIONS INCLUSES)"
+ROWS_FILENAME = "points_market_rows_clean.json"
+OUTPUT_FILENAME = "normalized_points_odds.json"
 
 
 def now_ts():
@@ -25,7 +27,7 @@ def load_json(path: Path):
 
 
 def load_rows(run_dir: Path):
-    path = run_dir / "points_market_rows_clean.json"
+    path = run_dir / ROWS_FILENAME
     if not path.exists():
         return []
     return load_json(path)
@@ -60,11 +62,12 @@ def parse_line_value(line_label):
     return int(match.group(1))
 
 
-def build_record_key(bookmaker, event_url, team, player_name_norm, line_value):
+def build_record_key(bookmaker, market_key, home_team_norm, away_team_norm, player_name_norm, line_value):
     return "|".join([
         bookmaker or "",
-        event_url or "",
-        team or "",
+        market_key or "",
+        home_team_norm or "",
+        away_team_norm or "",
         player_name_norm or "",
         "" if line_value is None else str(line_value),
     ])
@@ -107,6 +110,7 @@ def main():
         if not summary_path.exists():
             rejected_rows.append({
                 "event_url": event_url,
+                "run_dir": run_dir_raw,
                 "reason": "missing_summary_json"
             })
             continue
@@ -117,6 +121,7 @@ def main():
         except Exception as e:
             rejected_rows.append({
                 "event_url": event_url,
+                "run_dir": run_dir_raw,
                 "reason": "json_read_error",
                 "error": str(e)
             })
@@ -125,12 +130,15 @@ def main():
         if not rows:
             rejected_rows.append({
                 "event_url": event_url,
-                "reason": "missing_points_rows"
+                "run_dir": run_dir_raw,
+                "reason": "missing_market_rows"
             })
             continue
 
         home_team = teams[0] if len(teams) >= 1 else None
         away_team = teams[1] if len(teams) >= 2 else None
+        home_team_norm = normalize_name(home_team)
+        away_team_norm = normalize_name(away_team)
         event_slug = slugify(summary.get("title") or event_url)
 
         for row in rows:
@@ -140,6 +148,12 @@ def main():
                 line_label = row.get("line_label")
                 odds_raw = row.get("odds_raw")
 
+                if player_name_raw is None or str(player_name_raw).strip() == "":
+                    raise ValueError("player_name_raw_missing")
+
+                if odds_raw is None or str(odds_raw).strip() == "":
+                    raise ValueError("odds_raw_missing")
+
                 odds_decimal = float(str(odds_raw).replace(",", "."))
                 line_value = parse_line_value(line_label)
                 player_name_norm = normalize_name(player_name_raw)
@@ -147,8 +161,9 @@ def main():
 
                 record_key = build_record_key(
                     BOOKMAKER,
-                    event_url,
-                    team_norm,
+                    MARKET_KEY,
+                    home_team_norm,
+                    away_team_norm,
                     player_name_norm,
                     line_value
                 )
@@ -164,7 +179,9 @@ def main():
                     "event_slug": event_slug,
                     "event_title": summary.get("title"),
                     "home_team": home_team,
+                    "home_team_norm": home_team_norm,
                     "away_team": away_team,
+                    "away_team_norm": away_team_norm,
                     "team": team,
                     "team_norm": team_norm,
                     "player_name_raw": player_name_raw,
@@ -197,13 +214,14 @@ def main():
         "rejected_rows": rejected_rows
     }
 
-    write_json(out_dir / "normalized_points_odds.json", final_payload)
+    write_json(out_dir / OUTPUT_FILENAME, final_payload)
     print(json.dumps({
         "ok": True,
         "accepted_events_count": len(accepted),
         "normalized_rows_count": len(normalized_rows),
         "rejected_rows_count": len(rejected_rows),
-        "output_dir": str(out_dir)
+        "output_dir": str(out_dir),
+        "output_file": str(out_dir / OUTPUT_FILENAME)
     }, ensure_ascii=False, indent=2))
 
 
