@@ -3,6 +3,7 @@ import json
 import unicodedata
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 
 
 BOOKMAKER = "unibet"
@@ -56,7 +57,7 @@ def parse_decimal_odds(odds_text: str):
         return None
 
 
-def normalize_row(row: dict) -> dict | None:
+def normalize_row(row: dict) -> Optional[dict]:
     player_name_raw = (row.get("player_name_raw") or "").strip()
 
     if not is_simple_scorer(player_name_raw):
