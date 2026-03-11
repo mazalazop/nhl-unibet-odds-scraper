@@ -20,12 +20,6 @@ BLOCK_LABEL_CANDIDATES = [
     "BUTEUR",
 ]
 
-TITLE_PATTERNS = [
-    r"Pariez sur (.*?) - (.*?) \| Hockey sur Glace \| Unibet\.fr",
-    r"(.*?) - (.*?) \| Hockey sur Glace \| Unibet\.fr",
-    r"(.*?) v (.*?) \| Hockey sur Glace \| Unibet\.fr",
-]
-
 
 def now_ts():
     return datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -95,8 +89,14 @@ def dedupe_keep_order(items):
 
 
 def extract_teams_from_title(title):
+    patterns = [
+        r"Pariez sur (.*?) - (.*?) \| Hockey sur Glace \| Unibet\.fr",
+        r"(.*?) - (.*?) \| Hockey sur Glace \| Unibet\.fr",
+        r"(.*?) v (.*?) \| Hockey sur Glace \| Unibet\.fr",
+    ]
+
     title = title or ""
-    for pattern in TITLE_PATTERNS:
+    for pattern in patterns:
         m = re.search(pattern, title, re.I)
         if m:
             return dedupe_keep_order([
@@ -121,7 +121,6 @@ def extract_teams_from_url(event_url):
     if len(parts) < 4:
         return []
 
-    # Heuristique simple NHL : découpe au milieu si aucune autre source n'est dispo
     half = len(parts) // 2
     team1 = " ".join(parts[:half]).replace("_", " ")
     team2 = " ".join(parts[half:]).replace("_", " ")
@@ -241,11 +240,9 @@ def score_market_block(text, label):
         score += 10.0
 
     score += txt.count("voir plus") * 2.0
+    score += txt.count("buteur") * 0.8
+    score += txt.count("2 buts ou plus") * 1.2
     score += len(re.findall(r"\b\d+(?:[.,]\d+)?\b", txt)) * 0.03
-    score += txt.count("buteur") * 0.5
-    score += txt.count("+") * 0.2
-    score += txt.count("2 buts") * 0.8
-    score += txt.count("3 buts") * 0.8
 
     return score
 
@@ -341,6 +338,7 @@ def isolate_lines(block_text):
 def is_decimal_odd(token):
     return bool(re.fullmatch(r"\d+(?:[.,]\d+)?", token))
 
+
 def is_valid_player_name(player_name, teams):
     name = norm_spaces(player_name)
     if not name:
@@ -368,10 +366,11 @@ def is_valid_player_name(player_name, teams):
         if team_key and (team_key in name_key or name_key in team_key):
             return False
 
-    if re.search(r"\b(match nul|prolongation|victoire|resultat|double chance)\b", name_key):
+    if re.search(r"\b(match nul|prolongation|victoire|resultat|double chance|points)\b", name_key):
         return False
 
     return True
+
 
 def parse_goals_rows(lines, teams):
     rows = []
@@ -382,10 +381,7 @@ def parse_goals_rows(lines, teams):
 
     header_tokens = {
         "buteur",
-        "2 buts",
         "2 buts ou plus",
-        "3 buts",
-        "3 buts ou plus",
     }
 
     team_match_keys = set([normalize_for_match(t) for t in teams if t])
@@ -414,7 +410,7 @@ def parse_goals_rows(lines, teams):
         j = i + 1
         odds = []
 
-        while j < len(lines) and len(odds) < 3:
+        while j < len(lines) and len(odds) < 2:
             token = lines[j]
             token_key = normalize_for_match(token)
 
@@ -431,37 +427,36 @@ def parse_goals_rows(lines, teams):
                 break
 
         if odds:
-            labels = ["1+", "2+", "3+"]
             player_rows = []
             has_dash = False
             odds_values = []
 
-            for idx, odd in enumerate(odds):
-                if idx >= len(labels):
-                    break
+            first_odd = odds[0]
 
-                line_label = labels[idx]
-
-                if odd == "-":
-                    has_dash = True
-                    continue
-
-                odds_values.append(odd)
+            if first_odd == "-":
+                has_dash = True
+            else:
+                odds_values.append(first_odd)
                 player_rows.append({
                     "team": current_team,
                     "player_name_raw": player_name,
-                    "line_label": line_label,
-                    "odds_raw": odd,
+                    "outcome_label": "Buteur",
+                    "odds_raw": first_odd,
                 })
+
+            for extra_odd in odds[1:]:
+                if extra_odd == "-":
+                    has_dash = True
 
             if player_rows:
                 rows.extend(player_rows)
                 debug_players.append({
                     "team": current_team,
                     "player_name_raw": player_name,
-                    "odds_count": len(odds_values),
+                    "odds_count_seen": len(odds),
+                    "kept_outcome_label": "Buteur",
                     "has_dash": has_dash,
-                    "odds_values": odds_values,
+                    "kept_odds_values": odds_values,
                 })
 
             i = j
@@ -480,8 +475,8 @@ def validate_rows(rows):
             return False, "missing_team"
         if not row.get("player_name_raw"):
             return False, "missing_player"
-        if not row.get("line_label"):
-            return False, "missing_line_label"
+        if row.get("outcome_label") != "Buteur":
+            return False, "invalid_outcome_label"
         if not row.get("odds_raw"):
             return False, "missing_odds_raw"
 
@@ -517,9 +512,7 @@ def main():
         "isolated_lines": 0,
         "parsed_rows_clean": 0,
         "players_seen": 0,
-        "players_with_3_odds": 0,
-        "players_with_less_than_3_odds": 0,
-        "players_with_dash": 0,
+        "players_kept_buteur": 0,
         "run_dir": str(run_dir),
         "fatal_error": None,
     }
@@ -554,10 +547,8 @@ def main():
             summary["teams_source"] = teams_source
             log(f"teams detected: {teams} source={teams_source}")
 
-            # 1) essayer de trouver le bloc directement sans cliquer d'onglet
             selected_block_label, block = select_first_matching_market_block(page, BLOCK_LABEL_CANDIDATES)
 
-            # 2) si pas trouvé, tenter de cliquer un onglet puis re-essayer
             if block is None:
                 summary["clicked_tab_label"] = click_first_matching_label(page, TAB_LABEL_CANDIDATES)
                 if summary["clicked_tab_label"]:
@@ -576,7 +567,6 @@ def main():
             summary["see_more_clicks"] = click_all_see_more_in_block(block)
             time.sleep(1.5)
 
-            # rescanner le bloc après expansion
             selected_block_label, block = select_first_matching_market_block(page, BLOCK_LABEL_CANDIDATES)
             summary["selected_block_label"] = selected_block_label
 
@@ -598,9 +588,7 @@ def main():
             summary["isolated_lines"] = len(isolated)
             summary["parsed_rows_clean"] = len(rows)
             summary["players_seen"] = len(debug_players)
-            summary["players_with_3_odds"] = sum(1 for x in debug_players if x["odds_count"] == 3)
-            summary["players_with_less_than_3_odds"] = sum(1 for x in debug_players if x["odds_count"] < 3)
-            summary["players_with_dash"] = sum(1 for x in debug_players if x["has_dash"])
+            summary["players_kept_buteur"] = len(rows)
             summary["is_complete_market"] = summary["remaining_see_more_in_market"] == 0
 
             write_text(run_dir / "goals_market_only.txt", block_text)
@@ -616,9 +604,7 @@ def main():
             summary["isolated_lines"] = len(isolated)
             summary["parsed_rows_clean"] = len(rows)
             summary["players_seen"] = len(debug_players)
-            summary["players_with_3_odds"] = sum(1 for x in debug_players if x.get("odds_count") == 3)
-            summary["players_with_less_than_3_odds"] = sum(1 for x in debug_players if x.get("odds_count", 0) < 3)
-            summary["players_with_dash"] = sum(1 for x in debug_players if x.get("has_dash"))
+            summary["players_kept_buteur"] = len(rows)
             summary["is_complete_market"] = summary["remaining_see_more_in_market"] == 0
 
             write_json(run_dir / "goals_market_isolated_lines.json", isolated)
