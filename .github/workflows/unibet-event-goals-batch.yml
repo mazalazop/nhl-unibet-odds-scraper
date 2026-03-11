@@ -42,6 +42,16 @@ jobs:
         run: |
           python3 scrapers/unibet_event_goals_batch_runner.py
 
+      - name: Build acceptance report
+        run: |
+          LATEST_BATCH_DIR=$(ls -td artifacts/unibet_event_goals_batch_runner/* | head -n 1)
+          export BATCH_SUMMARY_PATH="$LATEST_BATCH_DIR/batch_summary.json"
+          python3 scrapers/unibet_event_goals_acceptance_report.py
+
+      - name: Build normalized goals json
+        run: |
+          python3 scrapers/unibet_event_goals_normalize_accepted.py
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
