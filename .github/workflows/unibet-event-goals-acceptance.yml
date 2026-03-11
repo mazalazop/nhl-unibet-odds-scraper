@@ -1,0 +1,49 @@
+name: unibet-event-goals-acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      batch_summary_path:
+        description: "Chemin vers batch_summary.json"
+        required: true
+        type: string
+
+jobs:
+  acceptance:
+    runs-on: self-hosted
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Debug workspace
+        run: |
+          pwd
+          ls -la
+          find . -name "batch_summary.json" || true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run goals acceptance
+        env:
+          BATCH_SUMMARY_PATH: ${{ github.event.inputs.batch_summary_path }}
+        run: |
+          python3 scrapers/unibet_event_goals_acceptance.py
+
+      - name: Show generated acceptance report
+        if: always()
+        run: |
+          find . -name "acceptance_report.json" || true
+
+      - name: Upload goals acceptance artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unibet-event-goals-acceptance
+          path: |
+            **/acceptance_report.json
+          retention-days: 7
