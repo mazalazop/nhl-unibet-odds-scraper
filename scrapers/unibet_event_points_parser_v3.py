@@ -1,682 +1,624 @@
 import os
 import re
 import json
-import traceback
+import time
+import unicodedata
 from pathlib import Path
 from datetime import datetime
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
-from playwright.sync_api import sync_playwright
 
-
-START_MARKER_FULL = "NOMBRE DE POINTS DU JOUEUR (PROLONGATIONS INCLUSES)"
-START_MARKER_SHORT = "NOMBRE DE POINTS DU JOUEUR"
-
-COOKIE_SELECTORS = [
-    "button:has-text('Accepter')",
-    "button:has-text('Tout accepter')",
-    "button:has-text('Tout Accepter')",
-    "button:has-text('J’accepte')",
-    "button:has-text('Accept')",
+TAB_LABEL_CANDIDATES = [
+    "Joueurs",
+    "Points",
+    "Joueur",
 ]
 
-STOP_MARKETS = [
-    "BUTEUR DOUBLE CHANCE",
-    "LES 2 JOUEURS MARQUENT DANS LE MATCH",
-    "TOTAL DE BUTS MARQUÉS PAR LE DUO",
-    "TOTAL DE BUTS MARQUÉS PAR LE TRIO",
-    "BUTEUR ET SON ÉQUIPE GAGNE",
-    "LE JOUEUR MARQUE 2 BUTS OU PLUS",
-    "BUTEUR CHANCE TRIPLE",
-    "LES 3 JOUEURS MARQUENT DANS LE MATCH",
-    "ECART ENTRE ÉQUIPES",
-    "TOTAL DE BUTS",
-    "QUI MARQUERA LE 1ER BUT",
-    "COMBO RÉSULTAT DU MATCH",
-    "BUT POUR LES 2 ÉQUIPES",
-    "MARGE DU VAINQUEUR",
-    "SCORE EXACT",
-    "PÉRIODE AVEC LE PLUS DE BUTS",
-    "1ER TIERS-TEMPS",
-    "2E TIERS-TEMPS",
-    "3E TIERS-TEMPS",
-    "PROLONGATIONS OUI/NON",
-    "PASSEUR (PROLONGATIONS INCLUSES)",
-    "Simple",
-    "Combiné",
-    "Système",
+BLOCK_LABEL_CANDIDATES = [
+    "NOMBRE DE POINTS DU JOUEUR (PROLONGATIONS INCLUSES)",
+    "NOMBRE DE POINTS DU JOUEUR",
 ]
-
-SKIP_LINES = {
-    "Voir plus",
-    "Voir moins",
-    "Créer ma sélection",
-    "1",
-    "2",
-    "3",
-    "ou plus",
-}
-
-LINE_LABELS = ["1+", "2+", "3+"]
 
 
 def now_ts():
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
-def ensure_dir(path: Path):
+def log(msg):
+    print(f"[{now_ts()}] {msg}")
+
+
+def ensure_dir(path):
     path.mkdir(parents=True, exist_ok=True)
 
 
-def write_text(path: Path, content: str):
+def write_text(path, content):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
 
 
-def write_json(path: Path, payload):
+def write_json(path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def log(logs, message):
-    line = f"[{datetime.now().strftime('%H:%M:%S')}] {message}"
-    logs.append(line)
-    print(line)
+def norm_spaces(s):
+    return re.sub(r"\s+", " ", (s or "").strip())
 
 
-def wait_settle(page, ms=1800):
+def strip_accents(text):
+    text = unicodedata.normalize("NFKD", text)
+    return text.encode("ascii", "ignore").decode("ascii")
+
+
+def normalize_for_match(text):
+    text = strip_accents(str(text or ""))
+    text = text.casefold()
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def safe_inner_text(locator):
     try:
-        page.wait_for_load_state("domcontentloaded", timeout=10000)
-    except Exception:
-        pass
-    try:
-        page.wait_for_load_state("networkidle", timeout=8000)
-    except Exception:
-        pass
-    page.wait_for_timeout(ms)
-
-
-def body_text(page):
-    try:
-        return page.locator("body").inner_text(timeout=10000)
+        return locator.inner_text(timeout=1000)
     except Exception:
         return ""
 
 
-def snapshot(page, out_dir: Path, name: str):
+def safe_count(locator, max_count=None):
     try:
-        write_text(out_dir / f"{name}.html", page.content())
+        c = locator.count()
+        if max_count is not None:
+            return min(c, max_count)
+        return c
     except Exception:
-        write_text(out_dir / f"{name}.html", "")
-    write_text(out_dir / f"{name}_body.txt", body_text(page))
-    try:
-        page.screenshot(path=str(out_dir / f"{name}.png"), full_page=True)
-    except Exception:
-        pass
+        return 0
 
 
-def accept_cookies(page, logs):
-    for sel in COOKIE_SELECTORS:
-        try:
-            loc = page.locator(sel).first
-            if loc.count() > 0 and loc.is_visible(timeout=1500):
-                loc.click(timeout=3000)
-                log(logs, f"cookie clicked: {sel}")
-                page.wait_for_timeout(1200)
-                return sel
-        except Exception:
-            pass
-    log(logs, "cookie not clicked")
-    return None
-
-
-def get_match_teams(page):
-    try:
-        title = page.title()
-        m = re.search(r"Pariez sur (.+?) - (.+?) \|", title)
-        if m:
-            t1 = m.group(1).strip()
-            t2 = m.group(2).strip()
-            if t1 and t2:
-                return [t1, t2]
-    except Exception:
-        pass
-
-    teams = []
-    try:
-        h1s = page.locator("h1")
-        count = min(h1s.count(), 10)
-        for i in range(count):
-            txt = h1s.nth(i).inner_text(timeout=1000).strip()
-            if txt and txt not in teams:
-                teams.append(txt)
-    except Exception:
-        pass
-
-    if len(teams) >= 2:
-        return teams[:2]
-
-    return []
-
-
-def inner_text_safe(loc):
-    try:
-        return re.sub(r"\s+", " ", loc.inner_text(timeout=800)).strip()
-    except Exception:
-        return ""
-
-
-def try_click_locator(loc, logs, label_hint):
-    try:
-        if not loc.is_visible(timeout=800):
-            return False, None
-        label = inner_text_safe(loc)
-        if not label:
-            return False, None
-        if len(label) > 120:
-            return False, None
-        if "Tigne Point" in label or label.lower().startswith("unibet n’est pas affilié"):
-            return False, None
-        loc.scroll_into_view_if_needed(timeout=2000)
-        loc.click(timeout=4000)
-        log(logs, f"clicked {label_hint}: {label}")
-        return True, label
-    except Exception:
-        return False, None
-
-
-def click_points_market(page, logs):
-    exact_targets = ["Points"]
-    strict_targets = [
-        START_MARKER_FULL,
-        START_MARKER_SHORT,
-    ]
-
-    for text in exact_targets:
-        candidates = [
-            page.get_by_text(text, exact=True),
-            page.locator(f"button:has-text('{text}')"),
-            page.locator(f"a:has-text('{text}')"),
-            page.locator(f"span:has-text('{text}')"),
-            page.locator(f"div:has-text('{text}')"),
-        ]
-        for base in candidates:
-            try:
-                count = min(base.count(), 10)
-            except Exception:
-                count = 0
-            for i in range(count):
-                ok, label = try_click_locator(base.nth(i), logs, "points tab")
-                if ok:
-                    wait_settle(page, 1200)
-                    return label
-
-    for text in strict_targets:
-        candidates = [
-            page.get_by_text(text, exact=True),
-            page.locator(f"button:has-text('{text}')"),
-            page.locator(f"a:has-text('{text}')"),
-            page.locator(f"span:has-text('{text}')"),
-            page.locator(f"div:has-text('{text}')"),
-        ]
-        for base in candidates:
-            try:
-                count = min(base.count(), 10)
-            except Exception:
-                count = 0
-            for i in range(count):
-                ok, label = try_click_locator(base.nth(i), logs, "points market")
-                if ok:
-                    wait_settle(page, 1200)
-                    return label
-
-    raise RuntimeError("Points market not clickable")
-
-
-def find_points_block(page, logs):
-    patterns = [
-        re.compile(r"NOMBRE DE POINTS DU JOUEUR \(PROLONGATIONS INCLUSES\)", re.I),
-        re.compile(r"NOMBRE DE POINTS DU JOUEUR", re.I),
-    ]
-    candidates = []
-
-    for pattern in patterns:
-        try:
-            loc = page.locator("section, article, div").filter(has_text=pattern)
-            count = min(loc.count(), 40)
-        except Exception:
-            count = 0
-
-        for i in range(count):
-            item = loc.nth(i)
-            try:
-                if not item.is_visible(timeout=500):
-                    continue
-                txt = item.inner_text(timeout=1000)
-                txt_clean = re.sub(r"\s+", " ", txt).strip()
-                txt_up = txt_clean.upper()
-
-                if len(txt_clean) < 40 or len(txt_clean) > 2500:
-                    continue
-
-                score = 0
-                if START_MARKER_FULL.upper() in txt_up:
-                    score += 5
-                if START_MARKER_SHORT.upper() in txt_up:
-                    score += 4
-                if "VOIR PLUS" in txt_up or "VOIR MOINS" in txt_up:
-                    score += 3
-                if "1 OU PLUS" in txt_up:
-                    score += 2
-                if "2 OU PLUS" in txt_up:
-                    score += 2
-                if "3 OU PLUS" in txt_up:
-                    score += 2
-                score += min(len(txt_clean), 1200) / 1000
-
-                candidates.append((score, item, txt_clean))
-            except Exception:
-                continue
-
-    if not candidates:
-        log(logs, "points block not found")
-        return None, ""
-
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    best = candidates[0]
-    log(logs, f"points block selected score={best[0]}")
-    return best[1], best[2]
-
-
-def get_points_block_text(page, logs):
-    block, _ = find_points_block(page, logs)
-    if block is None:
-        raise RuntimeError("Points block not found")
-
-    try:
-        txt = block.inner_text(timeout=3000)
-    except Exception:
-        txt = ""
-
-    txt = re.sub(r"\r", "", txt or "")
-    txt = txt.strip()
-
-    if not txt:
-        raise RuntimeError("Points block text is empty")
-
-    return txt
-
-
-def click_all_see_more_in_points_block(page, logs, max_rounds=10, max_total_clicks=30):
-    total_clicks = 0
-
-    for round_idx in range(1, max_rounds + 1):
-        block, _ = find_points_block(page, logs)
-        if block is None:
-            break
-
-        clicked_this_round = 0
-
-        try:
-            buttons = block.locator("button, a, [role='button']")
-            count = min(buttons.count(), 80)
-        except Exception:
-            count = 0
-
-        for i in range(count):
-            if total_clicks >= max_total_clicks:
-                break
-
-            item = buttons.nth(i)
-
-            try:
-                if not item.is_visible(timeout=500):
-                    continue
-
-                label = inner_text_safe(item)
-                if label != "Voir plus":
-                    continue
-
-                item.scroll_into_view_if_needed(timeout=2000)
-                item.click(timeout=4000)
-                total_clicks += 1
-                clicked_this_round += 1
-                log(logs, f"clicked see more in points block #{total_clicks}")
-                wait_settle(page, 900)
-
-            except Exception:
-                continue
-
-        log(logs, f"see more round {round_idx}: clicked={clicked_this_round}")
-
-        if clicked_this_round == 0:
-            break
-
-    log(logs, f"total see more clicks in points block: {total_clicks}")
-    return total_clicks
-
-
-def normalize_lines(text):
-    lines = []
-    for line in text.splitlines():
-        clean = re.sub(r"\s+", " ", line).strip()
-        if clean:
-            lines.append(clean)
-    return lines
-
-
-def is_upper_market_heading(text):
-    if text in SKIP_LINES:
-        return False
-    if len(text) < 8:
-        return False
-    for m in STOP_MARKETS:
-        if text.upper().startswith(m):
-            return True
-    return False
-
-
-def split_by_teams(lines, teams):
-    sections = {team: [] for team in teams}
-    current_team = None
-
-    for line in lines:
-        if line in teams:
-            current_team = line
-            continue
-        if current_team:
-            sections[current_team].append(line)
-
-    return sections
-
-
-def is_decimal_odds(text):
-    return bool(re.fullmatch(r"\d{1,3}(?:[.,]\d{1,2})?", text))
-
-
-def clean_team_lines(lines):
+def dedupe_keep_order(items):
     out = []
-    for line in lines:
-        if line in SKIP_LINES:
+    seen = set()
+    for item in items:
+        key = normalize_for_match(item)
+        if not key or key in seen:
             continue
-        out.append(line)
+        seen.add(key)
+        out.append(norm_spaces(item))
     return out
 
 
-def parse_team_rows(team, lines):
-    tokens = clean_team_lines(lines)
-    rows = []
-    i = 0
-    player_debug = []
+def extract_teams_from_title(title):
+    patterns = [
+        r"Pariez sur (.*?) - (.*?) \| Hockey sur Glace \| Unibet\.fr",
+        r"(.*?) - (.*?) \| Hockey sur Glace \| Unibet\.fr",
+        r"(.*?) v (.*?) \| Hockey sur Glace \| Unibet\.fr",
+    ]
 
-    while i < len(tokens):
-        token = tokens[i]
+    title = title or ""
+    for pattern in patterns:
+        m = re.search(pattern, title, re.I)
+        if m:
+            return dedupe_keep_order([
+                norm_spaces(m.group(1)),
+                norm_spaces(m.group(2)),
+            ])
+    return []
 
-        if token in SKIP_LINES:
-            i += 1
+
+def extract_teams_from_url(event_url):
+    if not event_url:
+        return []
+
+    m = re.search(r"/event/([^/]+?)-\d+_\d+\.html", event_url)
+    if not m:
+        m = re.search(r"/event/([^/]+)\.html", event_url)
+    if not m:
+        return []
+
+    slug = m.group(1)
+    parts = slug.split("-")
+    if len(parts) < 4:
+        return []
+
+    half = len(parts) // 2
+    team1 = " ".join(parts[:half]).replace("_", " ")
+    team2 = " ".join(parts[half:]).replace("_", " ")
+    teams = dedupe_keep_order([team1, team2])
+
+    if len(teams) == 2:
+        return teams
+    return []
+
+
+def looks_like_matchup(text):
+    txt = norm_spaces(text)
+    if len(txt) < 7:
+        return False
+    if re.search(r"\b\d+(?:[.,]\d+)?\b", txt):
+        return False
+    return bool(re.search(r"\s[-–—]\s", txt))
+
+
+def split_matchup_text(text):
+    txt = norm_spaces(text)
+    parts = re.split(r"\s[-–—]\s", txt)
+    parts = [norm_spaces(p) for p in parts if norm_spaces(p)]
+    if len(parts) == 2:
+        return dedupe_keep_order(parts)
+    return []
+
+
+def extract_teams_from_h1(page):
+    selectors = [
+        "h1",
+        "[data-test='event-header']",
+        "[class*='event'] h1",
+        "[class*='Event'] h1",
+    ]
+    for sel in selectors:
+        try:
+            loc = page.locator(sel)
+            count = safe_count(loc, 10)
+            for i in range(count):
+                txt = safe_inner_text(loc.nth(i))
+                if looks_like_matchup(txt):
+                    teams = split_matchup_text(txt)
+                    if len(teams) == 2:
+                        return teams
+        except Exception:
             continue
+    return []
 
-        if is_upper_market_heading(token):
-            break
 
-        if is_decimal_odds(token):
-            i += 1
+def resolve_teams(page, event_url, title):
+    teams = extract_teams_from_title(title)
+    if len(teams) == 2:
+        return teams, "title"
+
+    teams = extract_teams_from_h1(page)
+    if len(teams) == 2:
+        return teams, "h1"
+
+    teams = extract_teams_from_url(event_url)
+    if len(teams) == 2:
+        return teams, "url_slug"
+
+    return [], "none"
+
+
+def click_cookie_if_present(page):
+    selectors = [
+        "button:has-text('Accepter')",
+        "button:has-text('Tout accepter')",
+        "button:has-text(\"J'accepte\")",
+    ]
+    for sel in selectors:
+        try:
+            btn = page.locator(sel).first
+            if btn.is_visible(timeout=1500):
+                btn.click(timeout=2000)
+                log(f"cookie clicked: {sel}")
+                return sel
+        except Exception:
             continue
+    return None
 
-        player = token
-        odds = []
-        has_dash = False
-        j = i + 1
 
-        while j < len(tokens):
-            nxt = tokens[j]
+def click_label(page, label):
+    candidates = [
+        page.locator(f"text={label}"),
+        page.get_by_text(label, exact=False),
+        page.locator(f"button:has-text('{label}')"),
+        page.locator(f"[role='tab']:has-text('{label}')"),
+    ]
+    for loc in candidates:
+        try:
+            if safe_count(loc) > 0:
+                target = loc.first
+                if target.is_visible(timeout=2500):
+                    target.click(timeout=5000)
+                    log(f"clicked label: {label}")
+                    return True
+        except Exception:
+            continue
+    return False
 
-            if is_decimal_odds(nxt):
-                odds.append(nxt.replace(",", "."))
-                j += 1
-                if len(odds) == 3:
-                    break
+
+def click_first_matching_label(page, labels):
+    for label in labels:
+        if click_label(page, label):
+            return label
+    return None
+
+
+def select_first_matching_market_block(page, labels):
+    for label in labels:
+        heading_candidates = [
+            page.get_by_text(label, exact=True),
+            page.locator(f"text={label}"),
+        ]
+
+        for heading_loc in heading_candidates:
+            try:
+                if safe_count(heading_loc) == 0:
+                    continue
+
+                heading = heading_loc.first
+                if not heading.is_visible(timeout=2000):
+                    continue
+
+                container_selectors = [
+                    "xpath=ancestor::section[1]",
+                    "xpath=ancestor::div[contains(@class, 'market')][1]",
+                    "xpath=ancestor::div[contains(@class, 'Market')][1]",
+                    "xpath=ancestor::div[1]",
+                ]
+
+                for selector in container_selectors:
+                    try:
+                        container = heading.locator(selector)
+                        if safe_count(container) == 0:
+                            continue
+
+                        block = container.first
+                        block_text = safe_inner_text(block)
+                        if not block_text:
+                            continue
+
+                        block_text_norm = normalize_for_match(block_text)
+
+                        if "nombre de points du joueur" not in block_text_norm:
+                            continue
+
+                        if "buteur" in block_text_norm:
+                            continue
+
+                        if "1 ou plus" not in block_text_norm:
+                            continue
+
+                        log(f"market block selected by heading: {label}")
+                        return label, block
+                    except Exception:
+                        continue
+            except Exception:
                 continue
 
-            if nxt == "-":
-                has_dash = True
-                j += 1
-                break
+    return None, None
 
+
+def click_all_see_more_in_block(block, max_rounds=8):
+    total_clicks = 0
+
+    for round_idx in range(1, max_rounds + 1):
+        clicked_this_round = 0
+
+        try:
+            buttons = block.locator("button")
+            count = safe_count(buttons, 100)
+
+            for i in range(count):
+                btn = buttons.nth(i)
+                txt = norm_spaces(safe_inner_text(btn)).lower()
+                if "voir plus" not in txt:
+                    continue
+
+                try:
+                    btn.click(timeout=3000)
+                    clicked_this_round += 1
+                    total_clicks += 1
+                    log(f"clicked see more in points block #{total_clicks}")
+                    time.sleep(0.8)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        log(f"see more round {round_idx}: clicked={clicked_this_round}")
+        if clicked_this_round == 0:
             break
+        time.sleep(1.0)
 
-        for idx, odd in enumerate(odds):
-            if idx >= len(LINE_LABELS):
+    log(f"total see more clicks in points block: {total_clicks}")
+    return total_clicks
+
+
+def remaining_see_more_in_block(block):
+    try:
+        txt = safe_inner_text(block).lower()
+        return txt.count("voir plus")
+    except Exception:
+        return -1
+
+
+def isolate_lines(block_text):
+    raw_lines = [norm_spaces(x) for x in block_text.splitlines()]
+    return [x for x in raw_lines if x]
+
+
+def is_decimal_odd(token):
+    return bool(re.fullmatch(r"\d+(?:[.,]\d+)?", token))
+
+
+def is_valid_player_name(player_name, teams):
+    name = norm_spaces(player_name)
+    if not name:
+        return False
+
+    name_key = normalize_for_match(name)
+
+    if name_key == "match nul":
+        return False
+
+    if " ou " in name_key:
+        return False
+
+    if "/" in name_key:
+        return False
+
+    if len(name.split()) < 2:
+        return False
+
+    team_keys = {normalize_for_match(t) for t in teams if t}
+    if name_key in team_keys:
+        return False
+
+    for team_key in team_keys:
+        if team_key and (team_key in name_key or name_key in team_key):
+            return False
+
+    if re.search(r"\b(match nul|prolongation|victoire|resultat|double chance|buteur)\b", name_key):
+        return False
+
+    return True
+
+
+def parse_points_rows(lines, teams):
+    rows = []
+    debug_players = []
+
+    i = 0
+    current_team = None
+
+    header_tokens = {
+        "1 ou plus",
+        "2 ou plus",
+        "3 ou plus",
+    }
+
+    team_match_keys = set([normalize_for_match(t) for t in teams if t])
+
+    while i < len(lines):
+        line = lines[i]
+        line_key = normalize_for_match(line)
+
+        if line_key in team_match_keys:
+            current_team = line
+            i += 1
+            while i < len(lines) and normalize_for_match(lines[i]) in header_tokens:
+                i += 1
+            continue
+
+        if not current_team:
+            i += 1
+            continue
+
+        player_name = line
+
+        if not is_valid_player_name(player_name, teams):
+            i += 1
+            continue
+
+        j = i + 1
+        odds = []
+
+        while j < len(lines) and len(odds) < 3:
+            token = lines[j]
+            token_key = normalize_for_match(token)
+
+            if token_key in team_match_keys:
                 break
-            rows.append({
-                "team": team,
-                "player_name_raw": player,
-                "line_label": LINE_LABELS[idx],
-                "odds_raw": odd,
-            })
 
-        player_debug.append({
-            "team": team,
-            "player_name_raw": player,
-            "odds_count": len(odds),
-            "has_dash": has_dash,
-            "odds_values": odds
-        })
+            if token_key in header_tokens or "voir plus" in token_key or "voir moins" in token_key:
+                break
 
-        if odds or has_dash:
+            if is_decimal_odd(token) or token == "-":
+                odds.append(token)
+                j += 1
+            else:
+                break
+
+        if odds:
+            player_rows = []
+            has_dash = False
+            odds_values = []
+
+            first_odd = odds[0]
+
+            if first_odd == "-":
+                has_dash = True
+            else:
+                odds_values.append(first_odd)
+                player_rows.append({
+                    "team": current_team,
+                    "player_name_raw": player_name,
+                    "outcome_label": "1 ou plus",
+                    "odds_raw": first_odd,
+                })
+
+            for extra_odd in odds[1:]:
+                if extra_odd == "-":
+                    has_dash = True
+
+            if player_rows:
+                rows.extend(player_rows)
+                debug_players.append({
+                    "team": current_team,
+                    "player_name_raw": player_name,
+                    "odds_count_seen": len(odds),
+                    "kept_outcome_label": "1 ou plus",
+                    "has_dash": has_dash,
+                    "kept_odds_values": odds_values,
+                })
+
             i = j
         else:
             i += 1
 
-    dedup = []
-    seen = set()
-    for row in rows:
-        key = (row["team"], row["player_name_raw"], row["line_label"], row["odds_raw"])
-        if key in seen:
-            continue
-        seen.add(key)
-        dedup.append(row)
-
-    return dedup, player_debug
+    return rows, debug_players
 
 
-def validate_clean_rows(rows, teams):
-    if len(teams) != 2:
-        return False, "teams_count_invalid"
-
+def validate_rows(rows):
     if not rows:
         return False, "no_rows"
 
-    allowed_labels = set(LINE_LABELS)
-
-    bad_tokens = {
-        "Match nul",
-        "Oui",
-        "Non",
-        "Double chance",
-        "Score exact",
-    }
-
     for row in rows:
-        team = row.get("team")
-        player = (row.get("player_name_raw") or "").strip()
-        line_label = row.get("line_label")
-        odds_raw = (row.get("odds_raw") or "").strip()
-
-        if team not in teams:
-            return False, f"invalid_team:{team}"
-
-        if not player:
-            return False, "empty_player"
-
-        if player in teams:
-            return False, f"player_is_team:{player}"
-
-        if player in bad_tokens:
-            return False, f"player_bad_token:{player}"
-
-        if line_label not in allowed_labels:
-            return False, f"invalid_line_label:{line_label}"
-
-        if not is_decimal_odds(odds_raw):
-            return False, f"invalid_odds:{odds_raw}"
+        if not row.get("team"):
+            return False, "missing_team"
+        if not row.get("player_name_raw"):
+            return False, "missing_player"
+        if row.get("outcome_label") != "1 ou plus":
+            return False, "invalid_outcome_label"
+        if not row.get("odds_raw"):
+            return False, "missing_odds_raw"
 
     return True, "ok"
 
 
-def summarize_player_debug(player_debug):
-    total_players = len(player_debug)
-    full_3_odds_players = 0
-    short_players = 0
-    dash_players = 0
-
-    for item in player_debug:
-        odds_count = item.get("odds_count", 0)
-        has_dash = bool(item.get("has_dash", False))
-
-        if odds_count == 3:
-            full_3_odds_players += 1
-        if odds_count < 3:
-            short_players += 1
-        if has_dash:
-            dash_players += 1
-
-    return {
-        "players_seen": total_players,
-        "players_with_3_odds": full_3_odds_players,
-        "players_with_less_than_3_odds": short_players,
-        "players_with_dash": dash_players,
-    }
-
-
 def main():
     event_url = os.getenv("UNIBET_EVENT_URL", "").strip()
+    headless = os.getenv("PW_HEADLESS", "true").lower() == "true"
+
     if not event_url:
         raise ValueError("UNIBET_EVENT_URL is required")
 
-    headless = os.getenv("PW_HEADLESS", "true").lower() == "true"
+    run_dir = Path("artifacts") / "unibet_event_points_parser_v3" / now_ts()
+    ensure_dir(run_dir)
 
-    ts = now_ts()
-    out_dir = Path("artifacts") / "unibet_event_points_parser_v3" / ts
-    ensure_dir(out_dir)
+    summary = {
+        "title": None,
+        "event_url": event_url,
+        "final_url": None,
+        "cookie_clicked": None,
+        "teams": [],
+        "teams_source": None,
+        "clicked_tab_label": None,
+        "tab_label_candidates": TAB_LABEL_CANDIDATES,
+        "selected_block_label": None,
+        "block_label_candidates": BLOCK_LABEL_CANDIDATES,
+        "see_more_clicks": 0,
+        "remaining_see_more_in_market": -1,
+        "is_complete_market": False,
+        "rows_valid": False,
+        "rows_validation_reason": "not_run",
+        "isolated_lines": 0,
+        "parsed_rows_clean": 0,
+        "players_seen": 0,
+        "players_kept_points_1_plus": 0,
+        "run_dir": str(run_dir),
+        "fatal_error": None,
+    }
 
-    logs = []
+    isolated = []
+    rows = []
+    debug_players = []
 
-    with sync_playwright() as p:
-        browser = None
-        context = None
-        page = None
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=headless)
+        context = browser.new_context(viewport={"width": 1600, "height": 2200})
+        page = context.new_page()
 
         try:
-            browser = p.chromium.launch(headless=headless)
-            context = browser.new_context(
-                viewport={"width": 1600, "height": 2200},
-                locale="fr-FR",
-                timezone_id="Europe/Paris",
-                user_agent=(
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/123.0.0.0 Safari/537.36"
-                ),
-            )
-            page = context.new_page()
-            page.set_default_timeout(45000)
+            log(f"goto: {event_url}")
+            page.goto(event_url, wait_until="domcontentloaded", timeout=60000)
+            time.sleep(2.0)
 
-            log(logs, f"goto: {event_url}")
-            page.goto(event_url, wait_until="domcontentloaded", timeout=45000)
-            wait_settle(page, 2500)
+            summary["cookie_clicked"] = click_cookie_if_present(page)
+            time.sleep(1.0)
 
-            cookie_clicked = accept_cookies(page, logs)
-            wait_settle(page, 1200)
+            try:
+                page.wait_for_load_state("networkidle", timeout=10000)
+            except PlaywrightTimeoutError:
+                pass
 
-            snapshot(page, out_dir, "initial")
+            summary["final_url"] = page.url
+            summary["title"] = page.title()
 
-            teams = get_match_teams(page)
-            log(logs, f"teams detected: {teams}")
+            teams, teams_source = resolve_teams(page, event_url, summary["title"])
+            summary["teams"] = teams
+            summary["teams_source"] = teams_source
+            log(f"teams detected: {teams} source={teams_source}")
 
-            if len(teams) != 2:
-                raise RuntimeError(f"Could not detect exactly 2 teams, got: {teams}")
+            selected_block_label, block = select_first_matching_market_block(page, BLOCK_LABEL_CANDIDATES)
 
-            clicked_market_label = click_points_market(page, logs)
-            snapshot(page, out_dir, "after_points_click")
+            if block is None:
+                summary["clicked_tab_label"] = click_first_matching_label(page, TAB_LABEL_CANDIDATES)
+                if summary["clicked_tab_label"]:
+                    time.sleep(2.0)
+                    selected_block_label, block = select_first_matching_market_block(page, BLOCK_LABEL_CANDIDATES)
 
-            see_more_clicks = click_all_see_more_in_points_block(page, logs, max_rounds=10, max_total_clicks=30)
-            snapshot(page, out_dir, "after_all_see_more")
+            summary["selected_block_label"] = selected_block_label
 
-            points_block_text = get_points_block_text(page, logs)
-            write_text(out_dir / "points_block_after_all_see_more.txt", points_block_text)
+            if block is None:
+                raise RuntimeError(
+                    "market_block_not_found: tab_candidates={0} block_candidates={1}".format(
+                        TAB_LABEL_CANDIDATES, BLOCK_LABEL_CANDIDATES
+                    )
+                )
 
-            isolated_lines = normalize_lines(points_block_text)
-            write_text(out_dir / "points_market_only.txt", "\n".join(isolated_lines))
-            write_json(out_dir / "points_market_only_lines.json", isolated_lines)
+            summary["see_more_clicks"] = click_all_see_more_in_block(block)
+            time.sleep(1.5)
 
-            sections = split_by_teams(isolated_lines, teams)
-            write_json(out_dir / "points_market_sections_by_team.json", sections)
+            selected_block_label, block = select_first_matching_market_block(page, BLOCK_LABEL_CANDIDATES)
+            summary["selected_block_label"] = selected_block_label
 
-            parsed_rows = []
-            players_debug = []
+            if block is None:
+                raise RuntimeError(
+                    "market_block_not_found_after_expand: block_candidates={0}".format(
+                        BLOCK_LABEL_CANDIDATES
+                    )
+                )
 
-            for team in teams:
-                team_rows, team_debug = parse_team_rows(team, sections.get(team, []))
-                parsed_rows.extend(team_rows)
-                players_debug.extend(team_debug)
+            block_text = safe_inner_text(block)
+            summary["remaining_see_more_in_market"] = remaining_see_more_in_block(block)
+            isolated = isolate_lines(block_text)
+            rows, debug_players = parse_points_rows(isolated, teams)
 
-            write_json(out_dir / "points_market_rows_clean.json", parsed_rows)
-            write_json(out_dir / "points_market_players_debug.json", players_debug)
+            rows_valid, rows_validation_reason = validate_rows(rows)
+            summary["rows_valid"] = rows_valid
+            summary["rows_validation_reason"] = rows_validation_reason
+            summary["isolated_lines"] = len(isolated)
+            summary["parsed_rows_clean"] = len(rows)
+            summary["players_seen"] = len(debug_players)
+            summary["players_kept_points_1_plus"] = len(rows)
+            summary["is_complete_market"] = summary["remaining_see_more_in_market"] == 0
 
-            remaining_see_more = sum(1 for x in isolated_lines if x == "Voir plus")
-            rows_valid, rows_validation_reason = validate_clean_rows(parsed_rows, teams)
-            player_debug_summary = summarize_player_debug(players_debug)
+            write_text(run_dir / "points_market_only.txt", block_text)
+            write_json(run_dir / "points_market_isolated_lines.json", isolated)
+            write_json(run_dir / "points_market_rows_clean.json", rows)
+            write_json(run_dir / "points_market_players_debug.json", debug_players)
+            write_json(run_dir / "summary.json", summary)
 
-            is_complete_market = (
-                remaining_see_more == 0
-                and len(parsed_rows) > 0
-                and rows_valid
-            )
-
-            summary = {
-                "title": page.title(),
-                "event_url": event_url,
-                "final_url": page.url,
-                "cookie_clicked": cookie_clicked,
-                "teams": teams,
-                "clicked_market_label": clicked_market_label,
-                "see_more_clicks": see_more_clicks,
-                "remaining_see_more_in_market": remaining_see_more,
-                "is_complete_market": is_complete_market,
-                "rows_valid": rows_valid,
-                "rows_validation_reason": rows_validation_reason,
-                "isolated_lines": len(isolated_lines),
-                "parsed_rows_clean": len(parsed_rows),
-                "players_seen": player_debug_summary["players_seen"],
-                "players_with_3_odds": player_debug_summary["players_with_3_odds"],
-                "players_with_less_than_3_odds": player_debug_summary["players_with_less_than_3_odds"],
-                "players_with_dash": player_debug_summary["players_with_dash"],
-                "run_dir": str(out_dir),
-            }
-
-            write_json(out_dir / "summary.json", summary)
-            write_text(out_dir / "events.log", "\n".join(logs))
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
 
         except Exception as e:
-            write_text(out_dir / "fatal_traceback.txt", traceback.format_exc())
-            write_text(out_dir / "events.log", "\n".join(logs + [f"fatal: {type(e).__name__}: {e}"]))
-            if page is not None:
-                try:
-                    snapshot(page, out_dir, "fatal_state")
-                except Exception:
-                    pass
+            summary["fatal_error"] = str(e)
+            summary["isolated_lines"] = len(isolated)
+            summary["parsed_rows_clean"] = len(rows)
+            summary["players_seen"] = len(debug_players)
+            summary["players_kept_points_1_plus"] = len(rows)
+            summary["is_complete_market"] = summary["remaining_see_more_in_market"] == 0
+
+            write_json(run_dir / "points_market_isolated_lines.json", isolated)
+            write_json(run_dir / "points_market_rows_clean.json", rows)
+            write_json(run_dir / "points_market_players_debug.json", debug_players)
+            write_json(run_dir / "summary.json", summary)
+
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
             raise
+
         finally:
-            try:
-                if context is not None:
-                    context.close()
-            except Exception:
-                pass
-            try:
-                if browser is not None:
-                    browser.close()
-            except Exception:
-                pass
+            context.close()
+            browser.close()
 
 
 if __name__ == "__main__":
