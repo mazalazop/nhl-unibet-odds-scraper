@@ -1,208 +1,230 @@
+import os
 import re
 import json
 import unicodedata
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
 
 
-BOOKMAKER = "unibet"
-MARKET_TYPE = "goals_scorers"
-NORMALIZER_VERSION = "v2"
+BOOKMAKER = "unibet_fr"
+MARKET_KEY = "player_goals_scorer_including_ot"
+MARKET_LABEL = "BUTEUR (PROLONGATIONS INCLUSES)"
+ROWS_FILENAME = "goals_market_rows_clean.json"
+OUTPUT_FILENAME = "normalized_goals_odds.json"
 
 
-def slugify(text: str) -> str:
-    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
-    text = re.sub(r"[^\w\s-]", "", text.lower())
-    return re.sub(r"[-\s]+", "-", text).strip("-")
+def now_ts():
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
-def write_json(path: Path, data):
+def write_json(path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def load_json(path: Path):
+def load_json(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def is_simple_scorer(player_name_raw: str) -> bool:
-    """
-    Filtre métier :
-    - accepte uniquement les buteurs simples
-    - rejette les combos avec "/"
-    - rejette les formulations type "2 buts ou plus"
-    - attend un format du type "Nom Joueur (3.40)"
-    """
-    if not player_name_raw or not isinstance(player_name_raw, str):
-        return False
-
-    if "/" in player_name_raw:
-        return False
-
-    if re.search(r"\bou\s+\d+", player_name_raw, re.IGNORECASE):
-        return False
-
-    return bool(re.match(r"^\s*[^/]+\s*\([^)]+\)\s*$", player_name_raw.strip()))
+def load_rows(run_dir):
+    path = run_dir / ROWS_FILENAME
+    if not path.exists():
+        return []
+    return load_json(path)
 
 
-def parse_decimal_odds(odds_text: str):
-    if not odds_text:
+def slugify(text):
+    if not text:
+        return ""
+    text = unicodedata.normalize("NFKD", str(text))
+    text = text.encode("ascii", "ignore").decode("ascii")
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text)
+    text = re.sub(r"-+", "-", text).strip("-")
+    return text
+
+
+def normalize_name(text):
+    if not text:
+        return ""
+    text = unicodedata.normalize("NFKC", str(text)).casefold().strip()
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def parse_line_value(line_label):
+    if line_label is None:
         return None
-
-    cleaned = odds_text.strip().replace(",", ".")
-    try:
-        return float(cleaned)
-    except ValueError:
-        return None
-
-
-def normalize_row(row: dict) -> Optional[dict]:
-    player_name_raw = (row.get("player_name_raw") or "").strip()
-
-    if not is_simple_scorer(player_name_raw):
-        return None
-
-    match = re.match(r"^(.*?)\s*\(([^)]+)\)\s*$", player_name_raw)
+    match = re.search(r"(\d+)", str(line_label))
     if not match:
         return None
-
-    player_display = match.group(1).strip()
-    odds_text = match.group(2).strip()
-    decimal_odds = parse_decimal_odds(odds_text)
-
-    player_slug = slugify(player_display)
-
-    return {
-        "bookmaker": BOOKMAKER,
-        "market_type": MARKET_TYPE,
-        "normalizer_version": NORMALIZER_VERSION,
-        "player_slug": player_slug,
-        "player_display": player_display,
-        "player_name_raw": player_name_raw,
-        "odds_text": odds_text,
-        "decimal_odds": decimal_odds,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-    }
+    return int(match.group(1))
 
 
-def get_latest_batch_dir(batch_root: Path) -> Path | None:
-    if not batch_root.exists():
-        return None
-
-    batch_dirs = [p for p in batch_root.iterdir() if p.is_dir()]
-    if not batch_dirs:
-        return None
-
-    return sorted(batch_dirs, key=lambda p: p.name, reverse=True)[0]
-
-
-def process_accepted_run(run_info: dict, output_root: Path) -> bool:
-    run_dir_value = run_info.get("run_dir")
-    if not run_dir_value:
-        return False
-
-    run_dir = Path(run_dir_value)
-    if not run_dir.exists():
-        print(f"❌ run_dir introuvable: {run_dir}")
-        return False
-
-    summary_path = run_dir / "summary.json"
-    rows_path = run_dir / "goals_market_rows_clean.json"
-
-    if not summary_path.exists():
-        print(f"❌ summary.json introuvable: {summary_path}")
-        return False
-
-    if not rows_path.exists():
-        print(f"❌ goals_market_rows_clean.json introuvable: {rows_path}")
-        return False
-
-    summary = load_json(summary_path)
-    rows = load_json(rows_path)
-
-    normalized_rows = []
-    for row in rows:
-        normalized = normalize_row(row)
-        if normalized:
-            normalized_rows.append(normalized)
-
-    output_run_dir = output_root / run_dir.name
-    output_run_dir.mkdir(parents=True, exist_ok=True)
-
-    write_json(
-        output_run_dir / "summary.json",
-        {
-            "source_run_dir": str(run_dir),
-            "source_event_url": run_info.get("event_url"),
-            "teams": run_info.get("teams"),
-            "selected_block_label": run_info.get("selected_block_label"),
-            "input_rows": len(rows),
-            "normalized_rows": len(normalized_rows),
-            "rejected_rows": len(rows) - len(normalized_rows),
-            "players_unique": len({r["player_slug"] for r in normalized_rows}),
-            "is_complete_market": summary.get("is_complete_market"),
-            "rows_valid": summary.get("rows_valid"),
-            "parsed_rows_clean": summary.get("parsed_rows_clean"),
-        },
-    )
-
-    write_json(output_run_dir / "rows_normalized.json", normalized_rows)
-
-    print(f"✅ {run_dir.name}: {len(rows)} → {len(normalized_rows)} normalisés")
-    return True
+def build_record_key(bookmaker, market_key, home_team_norm, away_team_norm, player_name_norm, line_value):
+    return "|".join([
+        bookmaker or "",
+        market_key or "",
+        home_team_norm or "",
+        away_team_norm or "",
+        player_name_norm or "",
+        "" if line_value is None else str(line_value),
+    ])
 
 
 def main():
-    batch_root = Path("artifacts") / "unibet_event_goals_batch_runner"
-    normalized_root = Path("artifacts") / "unibet_event_goals_normalized"
+    acceptance_report_path = os.getenv("ACCEPTANCE_REPORT_PATH", "").strip()
+    if not acceptance_report_path:
+        raise ValueError("ACCEPTANCE_REPORT_PATH is required")
 
-    latest_batch_dir = get_latest_batch_dir(batch_root)
-    if latest_batch_dir is None:
-        print("❌ Aucun dossier batch goals trouvé")
-        raise SystemExit(1)
+    acceptance_path = Path(acceptance_report_path)
+    if not acceptance_path.exists():
+        raise FileNotFoundError("Acceptance report not found: {0}".format(acceptance_report_path))
 
-    acceptance_report_path = latest_batch_dir / "acceptance_report.json"
-    if not acceptance_report_path.exists():
-        print(f"❌ acceptance_report.json introuvable: {acceptance_report_path}")
-        raise SystemExit(1)
+    acceptance = load_json(acceptance_path)
+    accepted = acceptance.get("accepted_for_insert", [])
 
-    acceptance_report = load_json(acceptance_report_path)
-    accepted_runs = acceptance_report.get("accepted_for_insert", [])
+    out_ts = now_ts()
+    out_dir = acceptance_path.parent / ("normalized_{0}".format(out_ts))
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    if not accepted_runs:
-        print("ℹ️ Aucun run accepté à normaliser")
-        normalized_root.mkdir(parents=True, exist_ok=True)
-        write_json(
-            normalized_root / "summary.json",
-            {
-                "batch_dir": str(latest_batch_dir),
-                "accepted_runs_count": 0,
-                "normalized_runs_count": 0,
-                "message": "Aucun run accepté à normaliser",
-            },
-        )
-        return
+    normalized_rows = []
+    rejected_rows = []
 
-    normalized_root.mkdir(parents=True, exist_ok=True)
+    for item in accepted:
+        event_url = item.get("event_url")
+        run_dir_raw = item.get("run_dir")
+        teams = item.get("teams") or []
 
-    success_count = 0
-    for run_info in accepted_runs:
-        if process_accepted_run(run_info, normalized_root):
-            success_count += 1
+        if not run_dir_raw:
+            rejected_rows.append({
+                "event_url": event_url,
+                "reason": "missing_run_dir"
+            })
+            continue
 
-    write_json(
-        normalized_root / "summary.json",
-        {
-            "batch_dir": str(latest_batch_dir),
-            "accepted_runs_count": len(accepted_runs),
-            "normalized_runs_count": success_count,
-            "normalized_at": datetime.utcnow().isoformat() + "Z",
-        },
-    )
+        run_dir = Path(run_dir_raw)
+        summary_path = run_dir / "summary.json"
 
-    print(f"🎉 {success_count}/{len(accepted_runs)} runs normalisés")
-    print(f"📁 Résultats: {normalized_root}")
+        if not summary_path.exists():
+            rejected_rows.append({
+                "event_url": event_url,
+                "run_dir": run_dir_raw,
+                "reason": "missing_summary_json"
+            })
+            continue
+
+        try:
+            summary = load_json(summary_path)
+            rows = load_rows(run_dir)
+        except Exception as e:
+            rejected_rows.append({
+                "event_url": event_url,
+                "run_dir": run_dir_raw,
+                "reason": "json_read_error",
+                "error": str(e)
+            })
+            continue
+
+        if not rows:
+            rejected_rows.append({
+                "event_url": event_url,
+                "run_dir": run_dir_raw,
+                "reason": "missing_market_rows"
+            })
+            continue
+
+        home_team = teams[0] if len(teams) >= 1 else None
+        away_team = teams[1] if len(teams) >= 2 else None
+        home_team_norm = normalize_name(home_team)
+        away_team_norm = normalize_name(away_team)
+        event_slug = slugify(summary.get("title") or event_url)
+
+        for row in rows:
+            try:
+                team = row.get("team")
+                player_name_raw = row.get("player_name_raw")
+                line_label = row.get("line_label")
+                odds_raw = row.get("odds_raw")
+
+                if player_name_raw is None or str(player_name_raw).strip() == "":
+                    raise ValueError("player_name_raw_missing")
+
+                if odds_raw is None or str(odds_raw).strip() == "":
+                    raise ValueError("odds_raw_missing")
+
+                odds_decimal = float(str(odds_raw).replace(",", "."))
+                line_value = parse_line_value(line_label)
+                player_name_norm = normalize_name(player_name_raw)
+                team_norm = normalize_name(team)
+
+                record_key = build_record_key(
+                    BOOKMAKER,
+                    MARKET_KEY,
+                    home_team_norm,
+                    away_team_norm,
+                    player_name_norm,
+                    line_value
+                )
+
+                normalized_rows.append({
+                    "record_key": record_key,
+                    "scrape_batch_ts": acceptance.get("batch_ts"),
+                    "scrape_normalized_ts": out_ts,
+                    "bookmaker": BOOKMAKER,
+                    "market_key": MARKET_KEY,
+                    "market_label": MARKET_LABEL,
+                    "event_url": event_url,
+                    "event_slug": event_slug,
+                    "event_title": summary.get("title"),
+                    "home_team": home_team,
+                    "home_team_norm": home_team_norm,
+                    "away_team": away_team,
+                    "away_team_norm": away_team_norm,
+                    "team": team,
+                    "team_norm": team_norm,
+                    "player_name_raw": player_name_raw,
+                    "player_name_norm": player_name_norm,
+                    "line_label": line_label,
+                    "line_value": line_value,
+                    "odds_raw": str(odds_raw),
+                    "odds_decimal": odds_decimal,
+                    "source_run_dir": run_dir_raw
+                })
+
+            except Exception as e:
+                rejected_rows.append({
+                    "event_url": event_url,
+                    "run_dir": run_dir_raw,
+                    "reason": "row_normalization_error",
+                    "row": row,
+                    "error": str(e)
+                })
+
+    final_payload = {
+        "batch_ts": acceptance.get("batch_ts"),
+        "normalized_ts": out_ts,
+        "bookmaker": BOOKMAKER,
+        "market_key": MARKET_KEY,
+        "market_label": MARKET_LABEL,
+        "accepted_events_count": len(accepted),
+        "normalized_rows_count": len(normalized_rows),
+        "rejected_rows_count": len(rejected_rows),
+        "normalized_rows": normalized_rows,
+        "rejected_rows": rejected_rows
+    }
+
+    write_json(out_dir / OUTPUT_FILENAME, final_payload)
+
+    print(json.dumps({
+        "ok": True,
+        "accepted_events_count": len(accepted),
+        "normalized_rows_count": len(normalized_rows),
+        "rejected_rows_count": len(rejected_rows),
+        "output_dir": str(out_dir),
+        "output_file": str(out_dir / OUTPUT_FILENAME)
+    }, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
