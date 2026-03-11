@@ -341,6 +341,37 @@ def isolate_lines(block_text):
 def is_decimal_odd(token):
     return bool(re.fullmatch(r"\d+(?:[.,]\d+)?", token))
 
+def is_valid_player_name(player_name, teams):
+    name = norm_spaces(player_name)
+    if not name:
+        return False
+
+    name_key = normalize_for_match(name)
+
+    if name_key == "match nul":
+        return False
+
+    if " ou " in name_key:
+        return False
+
+    if "/" in name_key:
+        return False
+
+    if len(name.split()) < 2:
+        return False
+
+    team_keys = {normalize_for_match(t) for t in teams if t}
+    if name_key in team_keys:
+        return False
+
+    for team_key in team_keys:
+        if team_key and (team_key in name_key or name_key in team_key):
+            return False
+
+    if re.search(r"\b(match nul|prolongation|victoire|resultat|double chance)\b", name_key):
+        return False
+
+    return True
 
 def parse_goals_rows(lines, teams):
     rows = []
@@ -375,6 +406,11 @@ def parse_goals_rows(lines, teams):
             continue
 
         player_name = line
+
+        if not is_valid_player_name(player_name, teams):
+            i += 1
+            continue
+
         j = i + 1
         odds = []
 
