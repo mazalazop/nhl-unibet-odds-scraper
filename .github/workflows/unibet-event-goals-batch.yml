@@ -28,11 +28,13 @@ jobs:
           python3 --version || true
           which pip3 || true
           pip3 --version || true
+          pwd
+          ls -la
 
       - name: Install dependencies
         run: |
           python3 -m pip install --upgrade pip
-          pip3 install playwright
+          pip3 install -r requirements.txt
           python3 -m playwright install chromium
 
       - name: Run goals batch
@@ -50,6 +52,8 @@ jobs:
 
       - name: Build normalized goals json
         run: |
+          LATEST_BATCH_DIR=$(ls -td artifacts/unibet_event_goals_batch_runner/* | head -n 1)
+          export ACCEPTANCE_REPORT_PATH="$LATEST_BATCH_DIR/acceptance_report.json"
           python3 scrapers/unibet_event_goals_normalize_accepted.py
 
       - name: Upload artifacts
