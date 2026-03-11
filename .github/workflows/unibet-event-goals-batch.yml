@@ -15,7 +15,7 @@ on:
 
 jobs:
   run-batch:
-    runs-on: self-hosted
+    runs-on: [self-hosted, macOS, X64, morgan-runner]
     timeout-minutes: 120
 
     steps:
