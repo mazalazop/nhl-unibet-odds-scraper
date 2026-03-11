@@ -2,10 +2,18 @@ import os
 import json
 from pathlib import Path
 
+ALLOWED_MARKET_LABELS = {
+    "NOMBRE DE POINTS DU JOUEUR (PROLONGATIONS INCLUSES)",
+    "NOMBRE DE POINTS DU JOUEUR",
+}
+
 
 def write_json(path: Path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def load_json(path: Path):
@@ -29,7 +37,6 @@ def main():
 
     for item in results:
         summary = item.get("summary") or {}
-
         reasons = []
 
         if item.get("returncode") != 0:
@@ -39,7 +46,8 @@ def main():
         if len(teams) != 2:
             reasons.append("teams_count_invalid")
 
-        if summary.get("clicked_market_label") != "NOMBRE DE POINTS DU JOUEUR (PROLONGATIONS INCLUSES)":
+        selected_block_label = (summary.get("selected_block_label") or "").strip()
+        if selected_block_label not in ALLOWED_MARKET_LABELS:
             reasons.append("wrong_market_label")
 
         if summary.get("remaining_see_more_in_market") != 0:
@@ -51,18 +59,27 @@ def main():
         if summary.get("rows_valid") is not True:
             reasons.append("rows_valid_false")
 
-        if summary.get("parsed_rows_clean", 0) <= 0:
+        parsed_rows_clean = summary.get("parsed_rows_clean", 0)
+        if parsed_rows_clean <= 0:
             reasons.append("no_rows")
+
+        players_seen = summary.get("players_seen", 0)
+        players_kept_points_1_plus = summary.get("players_kept_points_1_plus", 0)
+
+        if players_seen <= 0:
+            reasons.append("no_players_seen")
+
+        if players_kept_points_1_plus <= 0:
+            reasons.append("no_points_1_plus_rows")
 
         result_row = {
             "event_url": item.get("event_url"),
             "run_dir": item.get("run_dir"),
             "teams": teams,
-            "parsed_rows_clean": summary.get("parsed_rows_clean"),
-            "players_seen": summary.get("players_seen"),
-            "players_with_3_odds": summary.get("players_with_3_odds"),
-            "players_with_less_than_3_odds": summary.get("players_with_less_than_3_odds"),
-            "players_with_dash": summary.get("players_with_dash"),
+            "selected_block_label": selected_block_label,
+            "parsed_rows_clean": parsed_rows_clean,
+            "players_seen": players_seen,
+            "players_kept_points_1_plus": players_kept_points_1_plus,
             "accepted_for_insert": len(reasons) == 0,
             "reasons": reasons,
         }
