@@ -248,40 +248,64 @@ def score_market_block(text, label):
 
 
 def select_first_matching_market_block(page, labels):
-    best_block = None
-    best_label = None
-    best_score = -1.0
+    for label in labels:
+        heading_candidates = [
+            page.get_by_text(label, exact=True),
+            page.locator(f"text={label}"),
+        ]
 
-    selectors = [
-        "section",
-        "div",
-        "[class*='market']",
-        "[class*='Market']",
-        "[data-test]",
-    ]
-
-    for sel in selectors:
-        try:
-            loc = page.locator(sel)
-            count = safe_count(loc, 300)
-            for i in range(count):
-                item = loc.nth(i)
-                txt = safe_inner_text(item)
-                if not txt:
+        for heading_loc in heading_candidates:
+            try:
+                if safe_count(heading_loc) == 0:
                     continue
 
-                for label in labels:
-                    score = score_market_block(txt, label)
-                    if score > best_score:
-                        best_score = score
-                        best_block = item
-                        best_label = label
-        except Exception:
-            continue
+                heading = heading_loc.first
+                if not heading.is_visible(timeout=2000):
+                    continue
 
-    if best_block is not None and best_score >= 10.0:
-        log(f"market block selected label={best_label} score={best_score:.3f}")
-        return best_label, best_block
+                container_selectors = [
+                    "xpath=ancestor::section[1]",
+                    "xpath=ancestor::div[contains(@class, 'market')][1]",
+                    "xpath=ancestor::div[contains(@class, 'Market')][1]",
+                    "xpath=ancestor::div[1]",
+                ]
+
+                for selector in container_selectors:
+                    try:
+                        container = heading.locator(selector)
+                        if safe_count(container) == 0:
+                            continue
+
+                        block = container.first
+                        block_text = safe_inner_text(block)
+
+                        if not block_text:
+                            continue
+
+                        block_text_norm = normalize_for_match(block_text)
+
+                        if "buteur" not in block_text_norm:
+                            continue
+
+                        # On évite les blocs qui ressemblent surtout à d'autres marchés
+                        if "nombre de points du joueur" in block_text_norm:
+                            continue
+
+                        if "buteur double chance" in block_text_norm:
+                            continue
+
+                        # Pour le marché goals, on veut voir la structure attendue
+                        if "2 buts ou plus" not in block_text_norm:
+                            continue
+
+                        log(f"market block selected by heading: {label}")
+                        return label, block
+
+                    except Exception:
+                        continue
+
+            except Exception:
+                continue
 
     return None, None
 
