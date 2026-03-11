@@ -19,14 +19,13 @@ jobs:
 
       - name: Debug workspace
         run: |
-          pwd
+          echo "PWD=$(pwd)"
           ls -la
+          echo "Python path:"
+          which python3 || true
+          python3 --version || true
+          echo "Search batch_summary.json:"
           find . -name "batch_summary.json" || true
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
 
       - name: Run goals acceptance
         env:
