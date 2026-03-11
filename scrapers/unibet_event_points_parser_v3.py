@@ -346,6 +346,12 @@ def is_valid_player_name(player_name, teams):
 
     name_key = normalize_for_match(name)
 
+    if name_key in {"ou plus", "1 ou plus", "2 ou plus", "3 ou plus"}:
+        return False
+
+    if re.search(r"^\d+\s+ou\s+plus$", name_key):
+        return False
+
     if name_key == "match nul":
         return False
 
