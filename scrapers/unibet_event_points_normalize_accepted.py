@@ -7,7 +7,7 @@ from datetime import datetime
 
 
 BOOKMAKER = "unibet_fr"
-MARKET_KEY = "player_points_including_ot"
+MARKET_KEY = "player_points_over_0_5_including_ot"
 MARKET_LABEL = "NOMBRE DE POINTS DU JOUEUR (PROLONGATIONS INCLUSES)"
 ROWS_FILENAME = "points_market_rows_clean.json"
 OUTPUT_FILENAME = "normalized_points_odds.json"
@@ -17,23 +17,23 @@ def now_ts():
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
-def write_json(path: Path, payload):
+def write_json(path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def load_json(path: Path):
+def load_json(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def load_rows(run_dir: Path):
+def load_rows(run_dir):
     path = run_dir / ROWS_FILENAME
     if not path.exists():
         return []
     return load_json(path)
 
 
-def slugify(text: str) -> str:
+def slugify(text):
     if not text:
         return ""
     text = unicodedata.normalize("NFKD", str(text))
@@ -44,7 +44,7 @@ def slugify(text: str) -> str:
     return text
 
 
-def normalize_name(text: str) -> str:
+def normalize_name(text):
     if not text:
         return ""
     text = unicodedata.normalize("NFKC", str(text)).casefold().strip()
@@ -53,23 +53,22 @@ def normalize_name(text: str) -> str:
     return text
 
 
-def parse_line_value(line_label):
-    if line_label is None:
-        return None
-    match = re.search(r"(\d+)", str(line_label))
-    if not match:
-        return None
-    return int(match.group(1))
-
-
-def build_record_key(bookmaker, market_key, home_team_norm, away_team_norm, player_name_norm, line_value):
+def build_record_key(bookmaker, market_key, home_team_norm, away_team_norm, player_name_norm):
     return "|".join([
         bookmaker or "",
         market_key or "",
         home_team_norm or "",
         away_team_norm or "",
         player_name_norm or "",
-        "" if line_value is None else str(line_value),
+    ])
+
+
+def build_dedupe_key(event_slug, team_norm, player_name_norm, outcome_label):
+    return "|".join([
+        event_slug or "",
+        team_norm or "",
+        player_name_norm or "",
+        outcome_label or "",
     ])
 
 
@@ -80,17 +79,20 @@ def main():
 
     acceptance_path = Path(acceptance_report_path)
     if not acceptance_path.exists():
-        raise FileNotFoundError(f"Acceptance report not found: {acceptance_report_path}")
+        raise FileNotFoundError("Acceptance report not found: {0}".format(acceptance_report_path))
 
     acceptance = load_json(acceptance_path)
     accepted = acceptance.get("accepted_for_insert", [])
 
     out_ts = now_ts()
-    out_dir = acceptance_path.parent / f"normalized_{out_ts}"
+    out_dir = acceptance_path.parent / ("normalized_{0}".format(out_ts))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     normalized_rows = []
     rejected_rows = []
+    duplicate_rows = []
+
+    seen_keys = {}
 
     for item in accepted:
         event_url = item.get("event_url")
@@ -145,17 +147,19 @@ def main():
             try:
                 team = row.get("team")
                 player_name_raw = row.get("player_name_raw")
-                line_label = row.get("line_label")
+                outcome_label = row.get("outcome_label")
                 odds_raw = row.get("odds_raw")
 
                 if player_name_raw is None or str(player_name_raw).strip() == "":
                     raise ValueError("player_name_raw_missing")
 
+                if outcome_label != "1 ou plus":
+                    raise ValueError("invalid_outcome_label")
+
                 if odds_raw is None or str(odds_raw).strip() == "":
                     raise ValueError("odds_raw_missing")
 
                 odds_decimal = float(str(odds_raw).replace(",", "."))
-                line_value = parse_line_value(line_label)
                 player_name_norm = normalize_name(player_name_raw)
                 team_norm = normalize_name(team)
 
@@ -164,11 +168,17 @@ def main():
                     MARKET_KEY,
                     home_team_norm,
                     away_team_norm,
-                    player_name_norm,
-                    line_value
+                    player_name_norm
                 )
 
-                normalized_rows.append({
+                dedupe_key = build_dedupe_key(
+                    event_slug,
+                    team_norm,
+                    player_name_norm,
+                    outcome_label
+                )
+
+                normalized_row = {
                     "record_key": record_key,
                     "scrape_batch_ts": acceptance.get("batch_ts"),
                     "scrape_normalized_ts": out_ts,
@@ -186,12 +196,26 @@ def main():
                     "team_norm": team_norm,
                     "player_name_raw": player_name_raw,
                     "player_name_norm": player_name_norm,
-                    "line_label": line_label,
-                    "line_value": line_value,
+                    "outcome_label": outcome_label,
                     "odds_raw": str(odds_raw),
                     "odds_decimal": odds_decimal,
                     "source_run_dir": run_dir_raw
-                })
+                }
+
+                if dedupe_key in seen_keys:
+                    duplicate_rows.append({
+                        "dedupe_key": dedupe_key,
+                        "kept_record_key": seen_keys[dedupe_key]["record_key"],
+                        "dropped_record_key": normalized_row["record_key"],
+                        "kept_odds_decimal": seen_keys[dedupe_key]["odds_decimal"],
+                        "dropped_odds_decimal": normalized_row["odds_decimal"],
+                        "row": normalized_row
+                    })
+                    continue
+
+                seen_keys[dedupe_key] = normalized_row
+                normalized_rows.append(normalized_row)
+
             except Exception as e:
                 rejected_rows.append({
                     "event_url": event_url,
@@ -209,16 +233,20 @@ def main():
         "market_label": MARKET_LABEL,
         "accepted_events_count": len(accepted),
         "normalized_rows_count": len(normalized_rows),
+        "duplicate_rows_count": len(duplicate_rows),
         "rejected_rows_count": len(rejected_rows),
         "normalized_rows": normalized_rows,
+        "duplicate_rows": duplicate_rows,
         "rejected_rows": rejected_rows
     }
 
     write_json(out_dir / OUTPUT_FILENAME, final_payload)
+
     print(json.dumps({
         "ok": True,
         "accepted_events_count": len(accepted),
         "normalized_rows_count": len(normalized_rows),
+        "duplicate_rows_count": len(duplicate_rows),
         "rejected_rows_count": len(rejected_rows),
         "output_dir": str(out_dir),
         "output_file": str(out_dir / OUTPUT_FILENAME)
