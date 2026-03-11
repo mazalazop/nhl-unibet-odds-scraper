@@ -1,17 +1,16 @@
-name: unibet-event-goals-acceptance
+name: unibet-event-goals-batch-runner
 
 on:
   workflow_dispatch:
     inputs:
-      batch_summary_path:
-        description: "Chemin vers batch_summary.json"
+      urls:
+        description: "URLs Unibet, une par ligne"
         required: true
-        type: string
 
 jobs:
-  acceptance:
+  batch_runner:
     runs-on: self-hosted
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -19,30 +18,93 @@ jobs:
 
       - name: Debug workspace
         run: |
-          echo "PWD=$(pwd)"
+          pwd
           ls -la
-          echo "Python path:"
           which python3 || true
           python3 --version || true
-          echo "Search batch_summary.json:"
-          find . -name "batch_summary.json" || true
+
+      - name: Clean CI temp dirs
+        run: |
+          rm -rf _ci_batch _ci_acceptance
+          mkdir -p _ci_batch _ci_acceptance
+
+      - name: Run goals batch runner
+        env:
+          UNIBET_EVENT_URLS: ${{ github.event.inputs.urls }}
+          PW_HEADLESS: "true"
+        run: |
+          python3 scrapers/unibet_event_goals_batch_runner.py
+
+      - name: Collect current batch_summary.json
+        run: |
+          BATCH_FILE="$(find artifacts/unibet_event_goals_batch_runner -name 'batch_summary.json' -type f | sort | tail -n 1)"
+          if [ -z "$BATCH_FILE" ]; then
+            echo "batch_summary.json introuvable"
+            exit 1
+          fi
+          echo "BATCH_FILE=$BATCH_FILE"
+          cp "$BATCH_FILE" "_ci_batch/batch_summary.json"
+          ls -la _ci_batch
+
+      - name: Upload goals batch artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: unibet-event-goals-batch-summary
+          path: _ci_batch/batch_summary.json
+          if-no-files-found: error
+          retention-days: 7
+
+  acceptance:
+    runs-on: self-hosted
+    needs: batch_runner
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Clean acceptance temp dir
+        run: |
+          rm -rf downloaded_batch _ci_acceptance
+          mkdir -p downloaded_batch _ci_acceptance
+
+      - name: Download batch summary artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: unibet-event-goals-batch-summary
+          path: downloaded_batch
+
+      - name: Debug downloaded files
+        run: |
+          echo "Fichiers téléchargés :"
+          find downloaded_batch -type f -print
 
       - name: Run goals acceptance
-        env:
-          BATCH_SUMMARY_PATH: ${{ github.event.inputs.batch_summary_path }}
         run: |
+          BATCH_FILE="$(find downloaded_batch -name 'batch_summary.json' -type f | head -n 1)"
+          if [ -z "$BATCH_FILE" ]; then
+            echo "batch_summary.json introuvable"
+            exit 1
+          fi
+          echo "BATCH_FILE=$BATCH_FILE"
+          export BATCH_SUMMARY_PATH="$BATCH_FILE"
           python3 scrapers/unibet_event_goals_acceptance.py
 
-      - name: Show generated acceptance report
+      - name: Collect acceptance_report.json
         if: always()
         run: |
-          find . -name "acceptance_report.json" || true
+          ACCEPTANCE_FILE="$(find downloaded_batch -name 'acceptance_report.json' -type f | head -n 1)"
+          if [ -n "$ACCEPTANCE_FILE" ]; then
+            cp "$ACCEPTANCE_FILE" "_ci_acceptance/acceptance_report.json"
+          fi
+          find . -name "acceptance_report.json" -type f -print || true
+          ls -la _ci_acceptance || true
 
-      - name: Upload goals acceptance artifacts
+      - name: Upload acceptance artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: unibet-event-goals-acceptance
-          path: |
-            **/acceptance_report.json
+          path: _ci_acceptance/acceptance_report.json
+          if-no-files-found: warn
           retention-days: 7
