@@ -299,7 +299,7 @@ def select_exact_points_market_block(page: Page, teams: List[str]) -> Dict[str, 
     }
 
     result = page.evaluate(
-        """
+        r"""
         (cfg) => {
           const normalize = (value) => {
             return String(value || "")
