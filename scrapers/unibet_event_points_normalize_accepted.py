@@ -1,256 +1,211 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+scrapers/unibet_event_points_normalize_accepted.py
+
+Objectif
+--------
+Normaliser les lignes acceptées du marché Unibet POINTS 1+ dans un format
+stable pour la suite du pipeline (matching modèle -> bookmaker).
+
+Entrées via variables d'environnement
+-------------------------------------
+- ACCEPTANCE_REPORT_PATH : chemin vers acceptance_report.json
+
+Sorties
+-------
+Dans le même dossier batch :
+- normalized_points_odds.json
+
+Schéma métier
+-------------
+Chaque ligne normalisée contient notamment :
+- bookmaker = Unibet
+- market = player_points
+- stat = points
+- threshold = 1
+- outcome_label = 1 ou plus
+- odds_decimal
+- implied_probability
+- event_url / event_id / event_slug
+- home_team / away_team / team
+- player_name + version normalisée
+"""
+
+from __future__ import annotations
+
+import json
 import os
 import re
-import json
 import unicodedata
+from datetime import datetime, timezone
 from pathlib import Path
-from datetime import datetime
+from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 
-BOOKMAKER = "unibet_fr"
-MARKET_KEY = "player_points_over_0_5_including_ot"
-MARKET_LABEL = "NOMBRE DE POINTS DU JOUEUR (PROLONGATIONS INCLUSES)"
-ROWS_FILENAME = "points_market_rows_clean.json"
-OUTPUT_FILENAME = "normalized_points_odds.json"
+BOOKMAKER_NAME = "Unibet"
+MARKET_NAME = "player_points"
+STAT_NAME = "points"
+OUTCOME_LABEL = "1 ou plus"
+OUTCOME_KEY = "1_plus"
+THRESHOLD_VALUE = 1
 
 
-def now_ts():
-    return datetime.now().strftime("%Y%m%d_%H%M%S")
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def write_json(path, payload):
+def load_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def load_json(path):
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def load_rows(run_dir):
-    path = run_dir / ROWS_FILENAME
-    if not path.exists():
-        return []
-    return load_json(path)
-
-
-def slugify(text):
-    if not text:
+def safe_text(value: Any) -> str:
+    if value is None:
         return ""
-    text = unicodedata.normalize("NFKD", str(text))
+    return str(value).strip()
+
+
+def normalize_text(value: Any) -> str:
+    text = unicodedata.normalize("NFKD", str(value or ""))
     text = text.encode("ascii", "ignore").decode("ascii")
-    text = text.lower()
-    text = re.sub(r"[^a-z0-9]+", "-", text)
-    text = re.sub(r"-+", "-", text).strip("-")
+    text = text.casefold().strip()
+    text = re.sub(r"\s+", " ", text)
     return text
 
 
-def normalize_name(text):
-    if not text:
-        return ""
-    text = unicodedata.normalize("NFKC", str(text)).casefold().strip()
-    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+def parse_decimal_odd(value: Any) -> float:
+    raw = safe_text(value).replace(",", ".")
+    return float(raw)
 
 
-def build_record_key(bookmaker, market_key, home_team_norm, away_team_norm, player_name_norm):
-    return "|".join([
-        bookmaker or "",
-        market_key or "",
-        home_team_norm or "",
-        away_team_norm or "",
-        player_name_norm or "",
-    ])
+def extract_event_id(event_url: str) -> Optional[str]:
+    path = urlparse(event_url).path or ""
+    m = re.search(r"-(\d+_\d+)\.html$", path, re.I)
+    if m:
+        return m.group(1)
+    return None
 
 
-def build_dedupe_key(event_slug, team_norm, player_name_norm, outcome_label):
-    return "|".join([
-        event_slug or "",
-        team_norm or "",
-        player_name_norm or "",
-        outcome_label or "",
-    ])
+def extract_event_slug(event_url: str) -> str:
+    path = urlparse(event_url).path.rstrip("/")
+    slug = path.split("/")[-1]
+    return re.sub(r"\.html$", "", slug, flags=re.I)
 
 
-def main():
-    acceptance_report_path = os.getenv("ACCEPTANCE_REPORT_PATH", "").strip()
-    if not acceptance_report_path:
-        raise ValueError("ACCEPTANCE_REPORT_PATH is required")
+def resolve_acceptance_report_path() -> Path:
+    raw = os.getenv("ACCEPTANCE_REPORT_PATH", "").strip()
+    if not raw:
+        raise ValueError("ACCEPTANCE_REPORT_PATH est requis")
+    path = Path(raw)
+    if not path.exists():
+        raise FileNotFoundError(f"ACCEPTANCE_REPORT_PATH introuvable: {path}")
+    return path
 
-    acceptance_path = Path(acceptance_report_path)
-    if not acceptance_path.exists():
-        raise FileNotFoundError("Acceptance report not found: {0}".format(acceptance_report_path))
 
-    acceptance = load_json(acceptance_path)
-    accepted = acceptance.get("accepted_for_insert", [])
+def build_normalized_rows(report: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows_out: List[Dict[str, Any]] = []
+    events = report.get("events") or []
 
-    out_ts = now_ts()
-    out_dir = acceptance_path.parent / ("normalized_{0}".format(out_ts))
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    normalized_rows = []
-    rejected_rows = []
-    duplicate_rows = []
-
-    seen_keys = {}
-
-    for item in accepted:
-        event_url = item.get("event_url")
-        run_dir_raw = item.get("run_dir")
-        teams = item.get("teams") or []
-
-        if not run_dir_raw:
-            rejected_rows.append({
-                "event_url": event_url,
-                "reason": "missing_run_dir"
-            })
+    for event in events:
+        if not isinstance(event, dict) or not event.get("accepted"):
             continue
 
-        run_dir = Path(run_dir_raw)
-        summary_path = run_dir / "summary.json"
-
-        if not summary_path.exists():
-            rejected_rows.append({
-                "event_url": event_url,
-                "run_dir": run_dir_raw,
-                "reason": "missing_summary_json"
-            })
+        rows_path_raw = safe_text(event.get("rows_path"))
+        if not rows_path_raw:
+            continue
+        rows_path = Path(rows_path_raw)
+        if not rows_path.exists():
             continue
 
-        try:
-            summary = load_json(summary_path)
-            rows = load_rows(run_dir)
-        except Exception as e:
-            rejected_rows.append({
-                "event_url": event_url,
-                "run_dir": run_dir_raw,
-                "reason": "json_read_error",
-                "error": str(e)
-            })
+        payload = load_json(rows_path)
+        if not isinstance(payload, list):
             continue
 
-        if not rows:
-            rejected_rows.append({
+        event_url = safe_text(event.get("event_url"))
+        event_slug = safe_text(event.get("event_slug")) or extract_event_slug(event_url)
+        event_id = extract_event_id(event_url)
+        home_team = safe_text(event.get("home_team"))
+        away_team = safe_text(event.get("away_team"))
+
+        for row in payload:
+            if not isinstance(row, dict):
+                continue
+            odds_decimal = parse_decimal_odd(row.get("odds_raw"))
+            player_name = safe_text(row.get("player_name_raw"))
+            team = safe_text(row.get("team"))
+
+            normalized_row = {
+                "bookmaker": BOOKMAKER_NAME,
+                "market": MARKET_NAME,
+                "stat": STAT_NAME,
+                "threshold": THRESHOLD_VALUE,
+                "outcome_label": OUTCOME_LABEL,
+                "outcome_key": OUTCOME_KEY,
                 "event_url": event_url,
-                "run_dir": run_dir_raw,
-                "reason": "missing_market_rows"
-            })
-            continue
+                "event_id": event_id,
+                "event_slug": event_slug,
+                "home_team": home_team,
+                "away_team": away_team,
+                "team": team,
+                "team_normalized": normalize_text(team),
+                "player_name": player_name,
+                "player_name_normalized": normalize_text(player_name),
+                "odds_raw": safe_text(row.get("odds_raw")),
+                "odds_decimal": odds_decimal,
+                "implied_probability": 1.0 / odds_decimal,
+                "source_rows_path": str(rows_path),
+                "source_parser_run_dir": event.get("parser_run_dir"),
+                "source_parser_summary_path": event.get("parser_summary_path"),
+            }
+            rows_out.append(normalized_row)
 
-        home_team = teams[0] if len(teams) >= 1 else None
-        away_team = teams[1] if len(teams) >= 2 else None
-        home_team_norm = normalize_name(home_team)
-        away_team_norm = normalize_name(away_team)
-        event_slug = slugify(summary.get("title") or event_url)
+    rows_out.sort(key=lambda x: (
+        safe_text(x.get("event_slug")),
+        safe_text(x.get("team_normalized")),
+        safe_text(x.get("player_name_normalized")),
+    ))
+    return rows_out
 
-        for row in rows:
-            try:
-                team = row.get("team")
-                player_name_raw = row.get("player_name_raw")
-                outcome_label = row.get("outcome_label")
-                odds_raw = row.get("odds_raw")
 
-                if player_name_raw is None or str(player_name_raw).strip() == "":
-                    raise ValueError("player_name_raw_missing")
+def main() -> None:
+    acceptance_report_path = resolve_acceptance_report_path()
+    batch_dir = acceptance_report_path.parent
+    report = load_json(acceptance_report_path)
+    if not isinstance(report, dict):
+        raise ValueError("acceptance_report.json doit être un objet JSON")
 
-                if outcome_label != "1 ou plus":
-                    raise ValueError("invalid_outcome_label")
-
-                if odds_raw is None or str(odds_raw).strip() == "":
-                    raise ValueError("odds_raw_missing")
-
-                odds_decimal = float(str(odds_raw).replace(",", "."))
-                player_name_norm = normalize_name(player_name_raw)
-                team_norm = normalize_name(team)
-
-                record_key = build_record_key(
-                    BOOKMAKER,
-                    MARKET_KEY,
-                    home_team_norm,
-                    away_team_norm,
-                    player_name_norm
-                )
-
-                dedupe_key = build_dedupe_key(
-                    event_slug,
-                    team_norm,
-                    player_name_norm,
-                    outcome_label
-                )
-
-                normalized_row = {
-                    "record_key": record_key,
-                    "scrape_batch_ts": acceptance.get("batch_ts"),
-                    "scrape_normalized_ts": out_ts,
-                    "bookmaker": BOOKMAKER,
-                    "market_key": MARKET_KEY,
-                    "market_label": MARKET_LABEL,
-                    "event_url": event_url,
-                    "event_slug": event_slug,
-                    "event_title": summary.get("title"),
-                    "home_team": home_team,
-                    "home_team_norm": home_team_norm,
-                    "away_team": away_team,
-                    "away_team_norm": away_team_norm,
-                    "team": team,
-                    "team_norm": team_norm,
-                    "player_name_raw": player_name_raw,
-                    "player_name_norm": player_name_norm,
-                    "outcome_label": outcome_label,
-                    "odds_raw": str(odds_raw),
-                    "odds_decimal": odds_decimal,
-                    "source_run_dir": run_dir_raw
-                }
-
-                if dedupe_key in seen_keys:
-                    duplicate_rows.append({
-                        "dedupe_key": dedupe_key,
-                        "kept_record_key": seen_keys[dedupe_key]["record_key"],
-                        "dropped_record_key": normalized_row["record_key"],
-                        "kept_odds_decimal": seen_keys[dedupe_key]["odds_decimal"],
-                        "dropped_odds_decimal": normalized_row["odds_decimal"],
-                        "row": normalized_row
-                    })
-                    continue
-
-                seen_keys[dedupe_key] = normalized_row
-                normalized_rows.append(normalized_row)
-
-            except Exception as e:
-                rejected_rows.append({
-                    "event_url": event_url,
-                    "run_dir": run_dir_raw,
-                    "reason": "row_normalization_error",
-                    "row": row,
-                    "error": str(e)
-                })
-
-    final_payload = {
-        "batch_ts": acceptance.get("batch_ts"),
-        "normalized_ts": out_ts,
-        "bookmaker": BOOKMAKER,
-        "market_key": MARKET_KEY,
-        "market_label": MARKET_LABEL,
-        "accepted_events_count": len(accepted),
-        "normalized_rows_count": len(normalized_rows),
-        "duplicate_rows_count": len(duplicate_rows),
-        "rejected_rows_count": len(rejected_rows),
-        "normalized_rows": normalized_rows,
-        "duplicate_rows": duplicate_rows,
-        "rejected_rows": rejected_rows
+    normalized_rows = build_normalized_rows(report)
+    payload = {
+        "generated_at_utc": utc_now_iso(),
+        "batch_run_dir": str(batch_dir),
+        "source_acceptance_report_path": str(acceptance_report_path),
+        "bookmaker": BOOKMAKER_NAME,
+        "market": MARKET_NAME,
+        "stat": STAT_NAME,
+        "threshold": THRESHOLD_VALUE,
+        "outcome_label": OUTCOME_LABEL,
+        "rows_count": len(normalized_rows),
+        "accepted_event_count": int((report.get("totals") or {}).get("accepted_event_count") or 0),
+        "rows": normalized_rows,
     }
-
-    write_json(out_dir / OUTPUT_FILENAME, final_payload)
+    write_json(batch_dir / "normalized_points_odds.json", payload)
 
     print(json.dumps({
-        "ok": True,
-        "accepted_events_count": len(accepted),
-        "normalized_rows_count": len(normalized_rows),
-        "duplicate_rows_count": len(duplicate_rows),
-        "rejected_rows_count": len(rejected_rows),
-        "output_dir": str(out_dir),
-        "output_file": str(out_dir / OUTPUT_FILENAME)
+        "batch_run_dir": str(batch_dir),
+        "accepted_event_count": payload["accepted_event_count"],
+        "rows_count": payload["rows_count"],
+        "output": str(batch_dir / "normalized_points_odds.json"),
     }, ensure_ascii=False, indent=2))
+
+    if payload["rows_count"] == 0:
+        raise SystemExit("normalized_points_odds.json vide")
 
 
 if __name__ == "__main__":
