@@ -13,6 +13,14 @@ on:
         required: true
         default: true
         type: boolean
+      discovery_max_matches:
+        description: "Nombre max de matchs à cliquer pour la découverte UI (0 = auto)"
+        required: true
+        default: "0"
+        type: string
+
+permissions:
+  contents: read
 
 jobs:
   run-batch-from-hub:
@@ -42,6 +50,7 @@ jobs:
         env:
           UNIBET_HUB_URL: ${{ github.event.inputs.hub_url }}
           PW_HEADLESS: ${{ github.event.inputs.headless }}
+          DISCOVERY_MAX_MATCHES: ${{ github.event.inputs.discovery_max_matches }}
         run: |
           python3 scrapers/unibet_points_discover_event_urls.py
 
@@ -65,8 +74,8 @@ jobs:
           csv_urls = ",".join(urls)
 
           github_env = os.environ["GITHUB_ENV"]
-          with open(github_env, "a", encoding="utf-8") as f:
-              f.write(f"UNIBET_EVENT_URLS={csv_urls}\n")
+          with open(github_env, "a", encoding="utf-8") as handle:
+              handle.write(f"UNIBET_EVENT_URLS={csv_urls}\n")
 
           print(f"Discovered URLs exported to GITHUB_ENV: {len(urls)}")
           PY
