@@ -6,18 +6,23 @@ on:
       hub_url:
         description: "URL hub Unibet NHL"
         required: true
+        type: string
         default: "https://www.unibet.fr/sport/hockey-sur-glace/etats-unis/nhl?filter=R%C3%A9sultat&subFilter=R%C3%A9sultat+du+match"
-        type: string
       headless:
-        description: "Lancer en headless"
+        description: "Lancer Playwright en headless"
         required: true
-        default: true
         type: boolean
+        default: true
       discovery_max_matches:
-        description: "Nombre max de matchs à cliquer pour la découverte UI (0 = auto)"
+        description: "Nombre max de matchs à cliquer côté hub"
         required: true
-        default: "0"
         type: string
+        default: "12"
+      min_rows_per_event:
+        description: "Seuil minimal de lignes 1+ par match pour l'acceptance report"
+        required: true
+        type: string
+        default: "8"
 
 permissions:
   contents: read
@@ -71,23 +76,26 @@ jobs:
           if not urls:
               raise SystemExit("Aucune event URL découverte depuis le hub Unibet.")
 
-          csv_urls = ",".join(urls)
+          github_env = Path(os.environ["GITHUB_ENV"])
+          with github_env.open("a", encoding="utf-8") as handle:
+              handle.write(f"DISCOVERY_JSON_PATH={path}\n")
+              handle.write(f"UNIBET_EVENT_URLS={','.join(urls)}\n")
 
-          github_env = os.environ["GITHUB_ENV"]
-          with open(github_env, "a", encoding="utf-8") as handle:
-              handle.write(f"UNIBET_EVENT_URLS={csv_urls}\n")
-
-          print(f"Discovered URLs exported to GITHUB_ENV: {len(urls)}")
+          print(f"Discovered URLs exported: {len(urls)}")
+          print(f"DISCOVERY_JSON_PATH={path}")
           PY
 
       - name: Run points batch
         env:
+          DISCOVERY_JSON_PATH: ${{ env.DISCOVERY_JSON_PATH }}
           UNIBET_EVENT_URLS: ${{ env.UNIBET_EVENT_URLS }}
           PW_HEADLESS: ${{ github.event.inputs.headless }}
         run: |
           python3 scrapers/unibet_event_points_batch_runner.py
 
       - name: Build acceptance report
+        env:
+          MIN_ROWS_PER_EVENT: ${{ github.event.inputs.min_rows_per_event }}
         run: |
           LATEST_BATCH_DIR=$(ls -td artifacts/unibet_event_points_batch_runner/* | head -n 1)
           export BATCH_SUMMARY_PATH="$LATEST_BATCH_DIR/batch_summary.json"
