@@ -1,37 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-scrapers/unibet_event_points_acceptance_report.py
-
-Objectif
---------
-Prendre la sortie batch des parsers événementiels et décider quels matchs sont
-acceptés pour la normalisation finale.
-
-Entrées via variables d'environnement
--------------------------------------
-- BATCH_SUMMARY_PATH : chemin vers artifacts/.../batch_summary.json
-- MIN_ROWS_PER_EVENT : seuil mini de lignes, défaut = 8
-
-Sorties
--------
-Dans le même dossier batch :
-- acceptance_report.json
-- accepted_points_rows_raw.json
-
-Comportement
-------------
-- écrit toujours le rapport
-- échoue (exit code 1) si aucun match n'est accepté
-"""
-
 from __future__ import annotations
 
 import json
 import os
 import re
-import sys
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,10 +17,6 @@ DEFAULT_MIN_ROWS_PER_EVENT = 8
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def log(message: str) -> None:
-    print(message)
 
 
 def load_json(path: Path) -> Any:
@@ -90,6 +60,14 @@ def normalize_url(url: str) -> str:
     return urlunparse((scheme, netloc, path, "", query, ""))
 
 
+def looks_like_event_page(url: str) -> bool:
+    parsed = urlparse(normalize_url(url))
+    path = (parsed.path or "").lower().rstrip("/")
+    if "/event/" in path and path.endswith(".html"):
+        return True
+    return bool(re.search(r"/paris-hockey-sur-glace/etats-unis/nhl/\d+/[^/]+$", path))
+
+
 def normalize_key(text: Any) -> str:
     text = unicodedata.normalize("NFKD", str(text or ""))
     text = text.encode("ascii", "ignore").decode("ascii")
@@ -121,7 +99,6 @@ def evaluate_event(event: Dict[str, Any], min_rows: int) -> Tuple[bool, List[str
 
     if int(event.get("parser_exit_code") or 0) != 0:
         reasons.append("parser_exit_nonzero")
-
     if safe_text(summary.get("fatal_error")):
         reasons.append("fatal_error")
 
@@ -129,17 +106,15 @@ def evaluate_event(event: Dict[str, Any], min_rows: int) -> Tuple[bool, List[str
     expected_url = normalize_url(event.get("event_url"))
     if not final_url:
         reasons.append("missing_final_url")
-    elif "/event/" not in urlparse(final_url).path.lower():
+    elif not looks_like_event_page(final_url):
         reasons.append("final_url_not_event_page")
     elif expected_url and final_url != expected_url:
         reasons.append("final_url_mismatch")
 
     if not bool(summary.get("market_block_found")):
         reasons.append("market_block_not_found")
-
     if not bool(summary.get("rows_valid")):
         reasons.append(f"rows_invalid:{safe_text(summary.get('rows_validation_reason')) or 'unknown'}")
-
     if not bool(summary.get("is_complete_market")):
         reasons.append("market_not_complete")
 
@@ -171,7 +146,7 @@ def evaluate_event(event: Dict[str, Any], min_rows: int) -> Tuple[bool, List[str
             normalize_key(row.get("player_name_raw")),
             normalize_key(row.get("outcome_label")),
         )
-        if not all(key):
+        if not key[1] or not key[2]:
             reasons.append("missing_row_key_fields")
             break
         if key in seen:
@@ -239,6 +214,7 @@ def main() -> None:
                 "is_complete_market": summary.get("is_complete_market"),
                 "fatal_error": summary.get("fatal_error"),
                 "players_kept_points_1_plus": summary.get("players_kept_points_1_plus"),
+                "team_assignment_mode": summary.get("team_assignment_mode"),
             },
             "sample_rows": rows[:3],
         }
@@ -247,17 +223,15 @@ def main() -> None:
         if accepted:
             for row in rows:
                 enriched = dict(row)
-                enriched.update(
-                    {
-                        "event_url": event.get("event_url"),
-                        "event_slug": event.get("event_slug"),
-                        "home_team": home_team,
-                        "away_team": away_team,
-                        "parser_run_dir": event.get("parser_run_dir"),
-                        "parser_summary_path": event.get("parser_summary_path"),
-                        "rows_path": event.get("rows_path"),
-                    }
-                )
+                enriched.update({
+                    "event_url": event.get("event_url"),
+                    "event_slug": event.get("event_slug"),
+                    "home_team": home_team,
+                    "away_team": away_team,
+                    "parser_run_dir": event.get("parser_run_dir"),
+                    "parser_summary_path": event.get("parser_summary_path"),
+                    "rows_path": event.get("rows_path"),
+                })
                 accepted_rows.append(enriched)
 
     report = {
