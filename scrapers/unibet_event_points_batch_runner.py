@@ -1,42 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-scrapers/unibet_event_points_batch_runner.py
-
-Objectif
---------
-Exécuter le parseur de marché POINTS 1+ sur une liste d'event URLs Unibet,
-agréger les sorties, et produire un batch exploitable par les étapes suivantes.
-
-Entrées via variables d'environnement
--------------------------------------
-- DISCOVERY_JSON_PATH         : chemin vers discovered_event_urls.json
-- UNIBET_EVENT_URLS_JSON_PATH : chemin vers un JSON contenant event_urls
-- UNIBET_EVENT_URLS_JSON      : JSON brut contenant event_urls ou liste d'URLs
-- UNIBET_EVENT_URLS           : CSV d'URLs
-- PW_HEADLESS                 : true / false
-- PARSER_SCRIPT_PATH          : chemin du parseur, défaut = scrapers/unibet_event_points_parser.py
-- PARSER_TIMEOUT_SECONDS      : timeout par match, défaut = 240
-- FAIL_FAST                   : true / false, défaut = false
-
-Sorties
--------
-Dans artifacts/unibet_event_points_batch_runner/<timestamp>/ :
-- batch_inputs.json
-- batch_event_results.json
-- batch_summary.json
-- raw_points_markets.json
-- logs/*.stdout.log
-- logs/*.stderr.log
-
-Notes
------
-- Le script n'échoue pas sur un match isolé.
-- Le script écrit toujours les artefacts batch avant de quitter.
-- Le jugement final accepté / rejeté est délégué à l'étape acceptance_report.
-"""
-
 from __future__ import annotations
 
 import json
@@ -108,14 +72,12 @@ def normalize_url(url: str) -> str:
     raw = safe_text(url)
     if not raw:
         return ""
-
     parsed = urlparse(raw)
     scheme = parsed.scheme or "https"
     netloc = parsed.netloc.lower()
     path = re.sub(r"/+", "/", parsed.path or "/").rstrip("/")
     if not path:
         path = "/"
-
     query_items = parse_qsl(parsed.query, keep_blank_values=True)
     query_items = sorted(query_items)
     query = "&".join(f"{k}={v}" for k, v in query_items)
@@ -155,10 +117,8 @@ def parse_event_urls_from_payload(payload: Any) -> List[str]:
         if isinstance(urls, str):
             return [safe_text(urls)]
         return []
-
     if isinstance(payload, list):
         return [safe_text(x) for x in payload if safe_text(x)]
-
     if isinstance(payload, str):
         raw = payload.strip()
         if raw.startswith("[") or raw.startswith("{"):
@@ -167,13 +127,11 @@ def parse_event_urls_from_payload(payload: Any) -> List[str]:
             except Exception:
                 pass
         return [part.strip() for part in raw.split(",") if part.strip()]
-
     return []
 
 
 def resolve_event_urls() -> Dict[str, Any]:
     sources_checked: List[Dict[str, Any]] = []
-
     candidate_paths = [
         os.getenv("DISCOVERY_JSON_PATH", "").strip(),
         os.getenv("UNIBET_EVENT_URLS_JSON_PATH", "").strip(),
@@ -245,7 +203,6 @@ def resolve_new_parser_run_dir(before: Sequence[Path], after: Sequence[Path]) ->
 def read_parser_artifacts(run_dir: Optional[Path]) -> Dict[str, Any]:
     summary: Dict[str, Any] = {}
     rows: List[Dict[str, Any]] = []
-
     if run_dir is None:
         return {
             "parser_run_dir": None,
@@ -257,13 +214,11 @@ def read_parser_artifacts(run_dir: Optional[Path]) -> Dict[str, Any]:
 
     summary_path = run_dir / "summary.json"
     rows_path = run_dir / "points_market_rows_clean.json"
-
     if summary_path.exists():
         try:
             summary = load_json(summary_path)
         except Exception as exc:
             summary = {"fatal_error": f"summary_read_error: {exc}"}
-
     if rows_path.exists():
         try:
             payload = load_json(rows_path)
@@ -271,7 +226,6 @@ def read_parser_artifacts(run_dir: Optional[Path]) -> Dict[str, Any]:
                 rows = payload
         except Exception:
             rows = []
-
     return {
         "parser_run_dir": str(run_dir),
         "summary_path": str(summary_path) if summary_path.exists() else None,
@@ -293,36 +247,20 @@ def basic_prelim_ok(event_result: Dict[str, Any]) -> bool:
     )
 
 
-def run_parser_for_event(
-    event_url: str,
-    event_index: int,
-    total_events: int,
-    out_dir: Path,
-    parser_script: str,
-    headless: bool,
-    timeout_seconds: int,
-) -> Dict[str, Any]:
+def run_parser_for_event(event_url: str, event_index: int, total_events: int, out_dir: Path, parser_script: str, headless: bool, timeout_seconds: int) -> Dict[str, Any]:
     slug = extract_event_slug(event_url)
     logs_dir = out_dir / "logs"
     ensure_dir(logs_dir)
 
     before_dirs = list_run_dirs(PARSER_ARTIFACTS_ROOT)
     started_at = utc_now_iso()
-
     env = os.environ.copy()
     env["UNIBET_EVENT_URL"] = event_url
     env["PW_HEADLESS"] = "true" if headless else "false"
 
     log(f"[{event_index}/{total_events}] parser start: {slug}")
     try:
-        proc = subprocess.run(
-            [sys.executable, parser_script],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            check=False,
-        )
+        proc = subprocess.run([sys.executable, parser_script], env=env, capture_output=True, text=True, timeout=timeout_seconds, check=False)
         parser_exit_code = int(proc.returncode)
         stdout = proc.stdout or ""
         stderr = proc.stderr or ""
@@ -376,14 +314,12 @@ def run_parser_for_event(
         event_result["is_complete_market"] = summary.get("is_complete_market")
         event_result["fatal_error"] = summary.get("fatal_error")
         event_result["players_kept_points_1_plus"] = summary.get("players_kept_points_1_plus")
+        event_result["team_assignment_mode"] = summary.get("team_assignment_mode")
     else:
         event_result["fatal_error"] = "missing_parser_summary"
 
     event_result["prelim_ok"] = basic_prelim_ok(event_result)
-    log(
-        f"[{event_index}/{total_events}] parser done: exit={parser_exit_code} rows={len(rows)} "
-        f"prelim_ok={event_result['prelim_ok']} slug={slug}"
-    )
+    log(f"[{event_index}/{total_events}] parser done: exit={parser_exit_code} rows={len(rows)} prelim_ok={event_result['prelim_ok']} slug={slug}")
     return event_result
 
 
@@ -396,7 +332,6 @@ def aggregate_raw_rows(event_results: Sequence[Dict[str, Any]]) -> List[Dict[str
         path = Path(rows_path)
         if not path.exists():
             continue
-
         try:
             rows = load_json(path)
         except Exception:
@@ -412,17 +347,15 @@ def aggregate_raw_rows(event_results: Sequence[Dict[str, Any]]) -> List[Dict[str
             if not isinstance(row, dict):
                 continue
             enriched = dict(row)
-            enriched.update(
-                {
-                    "event_url": event.get("event_url"),
-                    "event_slug": event.get("event_slug"),
-                    "home_team": home_team,
-                    "away_team": away_team,
-                    "parser_run_dir": event.get("parser_run_dir"),
-                    "parser_summary_path": event.get("parser_summary_path"),
-                    "rows_path": event.get("rows_path"),
-                }
-            )
+            enriched.update({
+                "event_url": event.get("event_url"),
+                "event_slug": event.get("event_slug"),
+                "home_team": home_team,
+                "away_team": away_team,
+                "parser_run_dir": event.get("parser_run_dir"),
+                "parser_summary_path": event.get("parser_summary_path"),
+                "rows_path": event.get("rows_path"),
+            })
             out.append(enriched)
     return out
 
@@ -457,18 +390,8 @@ def main() -> None:
     write_json(out_dir / "batch_inputs.json", batch_inputs)
 
     event_results: List[Dict[str, Any]] = []
-    raw_points_rows: List[Dict[str, Any]] = []
-
     for idx, event_url in enumerate(event_urls, start=1):
-        event_result = run_parser_for_event(
-            event_url=event_url,
-            event_index=idx,
-            total_events=len(event_urls),
-            out_dir=out_dir,
-            parser_script=parser_script,
-            headless=headless,
-            timeout_seconds=timeout_seconds,
-        )
+        event_result = run_parser_for_event(event_url=event_url, event_index=idx, total_events=len(event_urls), out_dir=out_dir, parser_script=parser_script, headless=headless, timeout_seconds=timeout_seconds)
         event_results.append(event_result)
         if fail_fast and not event_result.get("prelim_ok"):
             log("FAIL_FAST actif: arrêt après premier échec parser.")
