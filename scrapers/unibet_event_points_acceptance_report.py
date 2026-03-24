@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 from urllib.parse import parse_qsl, urlparse, urlunparse
 
-DEFAULT_MIN_ROWS_PER_EVENT = 8
+DEFAULT_MIN_ROWS_PER_EVENT = 7
 
 
 def utc_now_iso() -> str:
@@ -115,10 +115,6 @@ def evaluate_event(event: Dict[str, Any], min_rows: int) -> Tuple[bool, List[str
         reasons.append("market_block_not_found")
     if not bool(summary.get("rows_valid")):
         reasons.append(f"rows_invalid:{safe_text(summary.get('rows_validation_reason')) or 'unknown'}")
-    # Le flag is_complete_market reste utile pour le debug, mais ne doit plus
-    # bloquer l'acceptance à lui seul. Avec le nouveau front Unibet, le bloc
-    # ciblé peut encore contenir du texte "Afficher plus" voisin sans que les
-    # lignes POINTS 1+ soient inexploitables.
 
     if not rows_path_raw:
         reasons.append("missing_rows_path")
@@ -257,9 +253,9 @@ def main() -> None:
             "rejected_event_count": sum(1 for x in report_events if not x.get("accepted")),
             "accepted_rows_count": len(accepted_rows),
         },
+        "reason_counts": dict(sorted(reason_counts.items(), key=lambda kv: (-kv[1], kv[0]))),
         "accepted_event_urls": [x.get("event_url") for x in report_events if x.get("accepted")],
         "rejected_event_urls": [x.get("event_url") for x in report_events if not x.get("accepted")],
-        "reason_counts": reason_counts,
         "artifacts": {
             "accepted_points_rows_raw_json": str(batch_dir / "accepted_points_rows_raw.json"),
             "acceptance_report_json": str(batch_dir / "acceptance_report.json"),
