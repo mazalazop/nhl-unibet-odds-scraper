@@ -413,9 +413,21 @@ def get_marked_market_block(page: Page) -> Optional[Locator]:
 
 
 def click_all_expand_in_block(block: Locator, max_rounds: int = 10) -> int:
+    """
+    Unibet a visiblement remplacé certains boutons "Afficher plus" par des nœuds
+    non sémantiques (div/span) ou des wrappers dont le texte n'est pas porté par
+    l'élément vraiment cliquable. On tente donc 2 stratégies à chaque round :
+    1) click Playwright classique sur button/a/[role=button]
+    2) fallback DOM : trouver tout élément visible contenant "Afficher plus" /
+       "Voir plus", remonter vers un ancêtre cliquable plausible, puis déclencher
+       un click JS.
+    """
     total_clicks = 0
+
     for round_idx in range(1, max_rounds + 1):
         clicked_this_round = 0
+
+        # Stratégie 1 : éléments sémantiques classiques.
         try:
             buttons = block.locator("button, a, [role='button']")
             for i in range(safe_count(buttons, 200)):
@@ -431,17 +443,81 @@ def click_all_expand_in_block(block: Locator, max_rounds: int = 10) -> int:
                     btn.click(timeout=3000)
                     clicked_this_round += 1
                     total_clicks += 1
-                    log(f"clicked expand in points block #{total_clicks}")
+                    log(f"clicked semantic expand in points block #{total_clicks}")
                     time.sleep(0.8)
                 except Exception:
                     continue
         except Exception:
             pass
 
+        # Stratégie 2 : fallback DOM si aucun clic sémantique n'a marché.
+        if clicked_this_round == 0:
+            try:
+                dom_clicked = block.evaluate(
+                    r"""
+                    (root) => {
+                      const normalize = (value) => String(value || "")
+                        .normalize("NFD")
+                        .replace(/[̀-ͯ]/g, "")
+                        .toLowerCase()
+                        .replace(/\s+/g, " ")
+                        .trim();
+
+                      const isVisible = (el) => {
+                        if (!el || !(el instanceof Element)) return false;
+                        const style = window.getComputedStyle(el);
+                        const rect = el.getBoundingClientRect();
+                        return style.display !== "none"
+                          && style.visibility !== "hidden"
+                          && rect.width > 0
+                          && rect.height > 0;
+                      };
+
+                      const candidateTexts = ["afficher plus", "voir plus"];
+                      const seen = new Set();
+                      const matches = [];
+
+                      for (const el of Array.from(root.querySelectorAll('*'))) {
+                        if (!isVisible(el)) continue;
+                        const txt = normalize(el.innerText || el.textContent || "");
+                        if (!txt) continue;
+                        if (!candidateTexts.some(label => txt === label || txt.startsWith(label) || txt.includes(` ${label}`) || txt.includes(label))) {
+                          continue;
+                        }
+                        let target = el.closest('button,a,[role="button"],div,span,p,li') || el;
+                        if (!isVisible(target)) target = el;
+                        const key = target.tagName + '|' + normalize(target.innerText || target.textContent || '') + '|' + Math.round(target.getBoundingClientRect().top);
+                        if (seen.has(key)) continue;
+                        seen.add(key);
+                        matches.push(target);
+                      }
+
+                      if (!matches.length) return 0;
+
+                      // On clique une seule cible par round pour laisser le DOM se mettre à jour.
+                      const target = matches[0];
+                      try { target.scrollIntoView({block: 'center'}); } catch (e) {}
+                      try { target.click(); } catch (e) {}
+                      try {
+                        target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                      } catch (e) {}
+                      return 1;
+                    }
+                    """
+                )
+                if int(dom_clicked or 0) > 0:
+                    clicked_this_round += int(dom_clicked)
+                    total_clicks += int(dom_clicked)
+                    log(f"clicked dom-fallback expand in points block #{total_clicks}")
+                    time.sleep(1.0)
+            except Exception:
+                pass
+
         log(f"expand round {round_idx}: clicked={clicked_this_round}")
         if clicked_this_round == 0:
             break
         time.sleep(0.8)
+
     log(f"total expand clicks in points block: {total_clicks}")
     return total_clicks
 
