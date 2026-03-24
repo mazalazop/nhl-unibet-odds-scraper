@@ -42,7 +42,7 @@ SECONDARY_TAB_LABEL_CANDIDATES = ["Points", "Joueurs"]
 MARKET_MARKER_ATTR = "data-oai-points-market-target"
 MARKET_MARKER_VALUE = "1"
 ARTIFACTS_ROOT = Path("artifacts") / "unibet_event_points_parser"
-NAME_RE = r"[A-Za-zÀ-ÿ'’\-\. ]+,\s*[A-Za-zÀ-ÿ'’\-\. ]+"
+NAME_RE = r"[A-ZÀ-Ý][A-Za-zÀ-ÿ'’\-.]+(?:,\s*[A-ZÀ-Ý][A-Za-zÀ-ÿ'’\-.]+|(?:\s+[A-ZÀ-Ý][A-Za-zÀ-ÿ'’\-.]+){1,2})"
 
 
 def now_ts() -> str:
@@ -269,11 +269,11 @@ def select_exact_points_market_block(page: Page, teams: List[str]) -> Dict[str, 
         "marker_value": MARKET_MARKER_VALUE,
     }
     result = page.evaluate(
-        r"""
+        """
         (cfg) => {
           const normalize = (value) => String(value || '')
             .normalize('NFD')
-            .replace(/[̀-ͯ]/g, '')
+            .replace(/[\u0300-\u036f]/g, '')
             .toLowerCase()
             .replace(/\s+/g, ' ')
             .trim();
@@ -291,109 +291,68 @@ def select_exact_points_market_block(page: Page, teams: List[str]) -> Dict[str, 
           const markerAttr = cfg.marker_attr;
           const markerValue = cfg.marker_value;
           const teamNames = (cfg.team_names || []).map(normalize).filter(Boolean);
-          const nameRe = /[A-Za-zÀ-ÿ'’\-. ]+,\s*[A-Za-zÀ-ÿ'’\-. ]+/g;
           const all = Array.from(document.querySelectorAll('div, section, article, li'));
 
           for (const prev of Array.from(document.querySelectorAll(`[${markerAttr}]`))) {
             prev.removeAttribute(markerAttr);
           }
 
-          const seedElements = [];
+          const candidates = [];
           for (const el of all) {
-            const text = normalize(el.innerText || '');
+            const raw = el.innerText || '';
+            const text = normalize(raw);
             if (!text) continue;
             if (!text.includes('nombre de points')) continue;
             if (!text.includes('joueur')) continue;
-            seedElements.push(el);
-          }
 
-          const dedupe = new Set();
-          const candidates = [];
-          for (const seed of seedElements) {
-            const chain = [seed];
-            let parent = seed.parentElement;
-            let hops = 0;
-            while (parent && hops < 6) {
-              chain.push(parent);
-              parent = parent.parentElement;
-              hops += 1;
-            }
+            const ownText = cleanOwnText(el);
+            const startsWithPoints = text.startsWith('nombre de points');
+            const ownStartsWithPoints = ownText.startsWith('nombre de points');
+            const onePlusHits = countMatches(text, /(?:^|\s)1\+(?:\s|$)/g);
+            const showMoreHits = countMatches(text, /afficher plus|voir plus/g);
+            const butsHits = countMatches(text, /nombre de buts - joueur/g);
+            const passesHits = countMatches(text, /nombre de passes decisives - joueur/g);
+            const teamHits = teamNames.filter(x => text.includes(x)).length;
+            const lineCount = raw.split(/\n+/).map(x => x.trim()).filter(Boolean).length;
+            const textLength = text.length;
+            const oddCount = countMatches(text, /\b\d+(?:[.,]\d+)?\b/g);
+            const headerMatch = targetLabels.some(lbl => text.startsWith(lbl));
 
-            for (const el of chain) {
-              const key = `${el.tagName}|${Math.round(el.getBoundingClientRect().top)}|${Math.round(el.getBoundingClientRect().height)}|${Math.round(el.getBoundingClientRect().width)}|${normalize((el.innerText || '').slice(0, 180))}`;
-              if (dedupe.has(key)) continue;
-              dedupe.add(key);
+            let score = 0;
+            if (headerMatch) score += 180;
+            if (startsWithPoints) score += 120;
+            if (ownStartsWithPoints) score += 140;
+            if (onePlusHits >= 4) score += 60;
+            if (teamHits >= 1) score += 20;
+            if (oddCount >= 8) score += 20;
+            if (lineCount >= 6 && lineCount <= 120) score += 20;
+            if (textLength >= 100 && textLength <= 3500) score += 20;
+            if (showMoreHits <= 4) score += 15;
+            score -= butsHits * 120;
+            score -= passesHits * 120;
+            if (textLength > 6000) score -= 150;
+            if (lineCount > 180) score -= 120;
 
-              const raw = el.innerText || '';
-              const text = normalize(raw);
-              if (!text) continue;
-              if (!text.includes('nombre de points')) continue;
-              if (!text.includes('joueur')) continue;
-
-              const ownText = cleanOwnText(el);
-              const startsWithPoints = text.startsWith('nombre de points');
-              const ownStartsWithPoints = ownText.startsWith('nombre de points');
-              const onePlusHits = countMatches(text, /(?:^|\s)1\+(?:\s|$)/g);
-              const showMoreHits = countMatches(text, /afficher plus|voir plus/g);
-              const butsHits = countMatches(text, /nombre de buts - joueur/g);
-              const passesHits = countMatches(text, /nombre de passes decisives - joueur/g);
-              const teamHits = teamNames.filter(x => text.includes(x)).length;
-              const lineCount = raw.split(/
-+/).map(x => x.trim()).filter(Boolean).length;
-              const textLength = text.length;
-              const oddCount = countMatches(text, /\d+(?:[.,]\d+)?/g);
-              const playerHits = countMatches(raw, nameRe);
-              const headerMatch = targetLabels.some(lbl => text.startsWith(lbl) || text.includes(lbl));
-
-              let score = 0;
-              if (headerMatch) score += 120;
-              if (startsWithPoints) score += 60;
-              if (ownStartsWithPoints) score += 25;
-              score += Math.min(onePlusHits, 20) * 18;
-              score += Math.min(playerHits, 20) * 22;
-              score += Math.min(oddCount, 80) * 2;
-              score += Math.min(teamHits, 2) * 10;
-              if (showMoreHits >= 1 && showMoreHits <= 4) score += 15;
-              if (lineCount >= 6 && lineCount <= 140) score += 20;
-              if (textLength >= 120 && textLength <= 5000) score += 20;
-
-              if (playerHits === 0) score -= 140;
-              if (onePlusHits === 0) score -= 140;
-              if (oddCount < 4) score -= 100;
-              if (textLength < 120) score -= 120;
-              if (lineCount < 4) score -= 120;
-              if (ownStartsWithPoints && textLength < 120) score -= 180;
-              if (ownStartsWithPoints && playerHits === 0) score -= 160;
-              score -= butsHits * 150;
-              score -= passesHits * 150;
-              if (textLength > 7000) score -= 180;
-              if (lineCount > 220) score -= 140;
-
-              candidates.push({
-                tag: el.tagName,
-                text_length: textLength,
-                line_count: lineCount,
-                odd_count: oddCount,
-                player_hits: playerHits,
-                one_plus_hits: onePlusHits,
-                show_more_hits: showMoreHits,
-                team_hits: teamHits,
-                buts_hits: butsHits,
-                passes_hits: passesHits,
-                starts_with_points: startsWithPoints,
-                own_starts_with_points: ownStartsWithPoints,
-                score,
-                preview: raw.slice(0, 900),
-                element: el,
-              });
-            }
+            candidates.push({
+              tag: el.tagName,
+              text_length: textLength,
+              line_count: lineCount,
+              odd_count: oddCount,
+              one_plus_hits: onePlusHits,
+              show_more_hits: showMoreHits,
+              team_hits: teamHits,
+              buts_hits: butsHits,
+              passes_hits: passesHits,
+              starts_with_points: startsWithPoints,
+              own_starts_with_points: ownStartsWithPoints,
+              score,
+              preview: raw.slice(0, 700),
+              element: el,
+            });
           }
 
           candidates.sort((a, b) => {
             if (b.score !== a.score) return b.score - a.score;
-            if (b.player_hits !== a.player_hits) return b.player_hits - a.player_hits;
-            if (b.one_plus_hits !== a.one_plus_hits) return b.one_plus_hits - a.one_plus_hits;
-            if (b.odd_count !== a.odd_count) return b.odd_count - a.odd_count;
             if (a.text_length !== b.text_length) return a.text_length - b.text_length;
             return a.line_count - b.line_count;
           });
@@ -403,7 +362,6 @@ def select_exact_points_market_block(page: Page, teams: List[str]) -> Dict[str, 
             text_length: c.text_length,
             line_count: c.line_count,
             odd_count: c.odd_count,
-            player_hits: c.player_hits,
             one_plus_hits: c.one_plus_hits,
             show_more_hits: c.show_more_hits,
             team_hits: c.team_hits,
@@ -419,29 +377,24 @@ def select_exact_points_market_block(page: Page, teams: List[str]) -> Dict[str, 
             return {found: false, selected: null, top_candidates: top};
           }
 
-          const viable = candidates.find(c => c.player_hits >= 1 && c.one_plus_hits >= 1 && c.odd_count >= 4);
-          if (!viable) {
-            return {found: false, selected: null, top_candidates: top};
-          }
-
-          viable.element.setAttribute(markerAttr, markerValue);
+          const best = candidates[0];
+          best.element.setAttribute(markerAttr, markerValue);
           return {
             found: true,
             selected: {
-              tag: viable.tag,
-              text_length: viable.text_length,
-              line_count: viable.line_count,
-              odd_count: viable.odd_count,
-              player_hits: viable.player_hits,
-              one_plus_hits: viable.one_plus_hits,
-              show_more_hits: viable.show_more_hits,
-              team_hits: viable.team_hits,
-              buts_hits: viable.buts_hits,
-              passes_hits: viable.passes_hits,
-              starts_with_points: viable.starts_with_points,
-              own_starts_with_points: viable.own_starts_with_points,
-              score: viable.score,
-              preview: viable.preview,
+              tag: best.tag,
+              text_length: best.text_length,
+              line_count: best.line_count,
+              odd_count: best.odd_count,
+              one_plus_hits: best.one_plus_hits,
+              show_more_hits: best.show_more_hits,
+              team_hits: best.team_hits,
+              buts_hits: best.buts_hits,
+              passes_hits: best.passes_hits,
+              starts_with_points: best.starts_with_points,
+              own_starts_with_points: best.own_starts_with_points,
+              score: best.score,
+              preview: best.preview,
             },
             top_candidates: top,
           };
@@ -460,21 +413,9 @@ def get_marked_market_block(page: Page) -> Optional[Locator]:
 
 
 def click_all_expand_in_block(block: Locator, max_rounds: int = 10) -> int:
-    """
-    Unibet a visiblement remplacé certains boutons "Afficher plus" par des nœuds
-    non sémantiques (div/span) ou des wrappers dont le texte n'est pas porté par
-    l'élément vraiment cliquable. On tente donc 2 stratégies à chaque round :
-    1) click Playwright classique sur button/a/[role=button]
-    2) fallback DOM : trouver tout élément visible contenant "Afficher plus" /
-       "Voir plus", remonter vers un ancêtre cliquable plausible, puis déclencher
-       un click JS.
-    """
     total_clicks = 0
-
     for round_idx in range(1, max_rounds + 1):
         clicked_this_round = 0
-
-        # Stratégie 1 : éléments sémantiques classiques.
         try:
             buttons = block.locator("button, a, [role='button']")
             for i in range(safe_count(buttons, 200)):
@@ -490,83 +431,124 @@ def click_all_expand_in_block(block: Locator, max_rounds: int = 10) -> int:
                     btn.click(timeout=3000)
                     clicked_this_round += 1
                     total_clicks += 1
-                    log(f"clicked semantic expand in points block #{total_clicks}")
+                    log(f"clicked expand in points block #{total_clicks}")
                     time.sleep(0.8)
                 except Exception:
                     continue
         except Exception:
             pass
 
-        # Stratégie 2 : fallback DOM si aucun clic sémantique n'a marché.
-        if clicked_this_round == 0:
-            try:
-                dom_clicked = block.evaluate(
-                    r"""
-                    (root) => {
-                      const normalize = (value) => String(value || "")
-                        .normalize("NFD")
-                        .replace(/[̀-ͯ]/g, "")
-                        .toLowerCase()
-                        .replace(/\s+/g, " ")
-                        .trim();
-
-                      const isVisible = (el) => {
-                        if (!el || !(el instanceof Element)) return false;
-                        const style = window.getComputedStyle(el);
-                        const rect = el.getBoundingClientRect();
-                        return style.display !== "none"
-                          && style.visibility !== "hidden"
-                          && rect.width > 0
-                          && rect.height > 0;
-                      };
-
-                      const candidateTexts = ["afficher plus", "voir plus"];
-                      const seen = new Set();
-                      const matches = [];
-
-                      for (const el of Array.from(root.querySelectorAll('*'))) {
-                        if (!isVisible(el)) continue;
-                        const txt = normalize(el.innerText || el.textContent || "");
-                        if (!txt) continue;
-                        if (!candidateTexts.some(label => txt === label || txt.startsWith(label) || txt.includes(` ${label}`) || txt.includes(label))) {
-                          continue;
-                        }
-                        let target = el.closest('button,a,[role="button"],div,span,p,li') || el;
-                        if (!isVisible(target)) target = el;
-                        const key = target.tagName + '|' + normalize(target.innerText || target.textContent || '') + '|' + Math.round(target.getBoundingClientRect().top);
-                        if (seen.has(key)) continue;
-                        seen.add(key);
-                        matches.push(target);
-                      }
-
-                      if (!matches.length) return 0;
-
-                      // On clique une seule cible par round pour laisser le DOM se mettre à jour.
-                      const target = matches[0];
-                      try { target.scrollIntoView({block: 'center'}); } catch (e) {}
-                      try { target.click(); } catch (e) {}
-                      try {
-                        target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-                      } catch (e) {}
-                      return 1;
-                    }
-                    """
-                )
-                if int(dom_clicked or 0) > 0:
-                    clicked_this_round += int(dom_clicked)
-                    total_clicks += int(dom_clicked)
-                    log(f"clicked dom-fallback expand in points block #{total_clicks}")
-                    time.sleep(1.0)
-            except Exception:
-                pass
-
         log(f"expand round {round_idx}: clicked={clicked_this_round}")
         if clicked_this_round == 0:
             break
         time.sleep(0.8)
-
     log(f"total expand clicks in points block: {total_clicks}")
     return total_clicks
+
+
+def click_all_expand_on_page(page: Page, max_rounds: int = 6) -> int:
+    total_clicks = 0
+    for round_idx in range(1, max_rounds + 1):
+        clicked = 0
+        try:
+            clicked = int(page.evaluate(
+                r"""
+                () => {
+                  const normalize = (value) => String(value || '')
+                    .normalize('NFD')
+                    .replace(/[\u0300-\u036f]/g, '')
+                    .toLowerCase()
+                    .replace(/\s+/g, ' ')
+                    .trim();
+
+                  const isVisible = (el) => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+                  };
+
+                  const all = Array.from(document.querySelectorAll('button, a, [role="button"], div, span'));
+                  let clicked = 0;
+                  for (const el of all) {
+                    if (!isVisible(el)) continue;
+                    const txt = normalize(el.innerText || el.textContent || '');
+                    if (!txt) continue;
+                    if (txt !== 'afficher plus' && txt !== 'voir plus') continue;
+
+                    let target = el;
+                    for (let hops = 0; hops < 4 && target; hops += 1) {
+                      if (typeof target.click === 'function') break;
+                      target = target.parentElement;
+                    }
+                    try {
+                      target.scrollIntoView({block: 'center'});
+                    } catch (e) {}
+                    try {
+                      target.click();
+                      clicked += 1;
+                    } catch (e) {}
+                  }
+                  return clicked;
+                }
+                """
+            ))
+        except Exception:
+            clicked = 0
+        if clicked <= 0:
+            break
+        total_clicks += clicked
+        log(f"global expand round {round_idx}: clicked={clicked}")
+        page.wait_for_timeout(900)
+    log(f"total global expand clicks: {total_clicks}")
+    return total_clicks
+
+
+def extract_points_market_from_page_text(page_text: str) -> str:
+    raw = str(page_text or '')
+    if not raw.strip():
+        return ''
+    patterns = [
+        r'Nombre de Points - Joueur(?: - Match)?',
+        r'NOMBRE DE POINTS - JOUEUR(?: - MATCH)?',
+        r'NOMBRE DE POINTS DU JOUEUR(?: \(PROLONGATIONS INCLUSES\))?',
+    ]
+    stop_patterns = [
+        r'\n\s*1N2 Handicap',
+        r'\n\s*Face à Face Handicap Buts',
+        r'\n\s*Face a Face Handicap Buts',
+        r'\n\s*Ecart du gagnant',
+        r'\n\s*Plus / Moins Buts',
+        r'\n\s*Plus / Moins But\(s\) - Equipe',
+        r'\n\s*Résultat et Plus/Moins Buts',
+        r'\n\s*Resultat et Plus/Moins Buts',
+        r'\n\s*Score Exact',
+        r'\n\s*Tiers-Temps le plus prolifique',
+        r'\n\s*Les 2 équipes marqueront-elles\?',
+        r'\n\s*Les 2 equipes marqueront-elles\?',
+        r'\n\s*Equipe inscrivant le 1er but',
+        r'\n\s*Equipe inscrivant le dernier but',
+        r'\n\s*Le match ira-t-il en prolongation',
+    ]
+    best = ''
+    for pat in patterns:
+        for m in re.finditer(pat, raw, flags=re.I):
+            start = m.start()
+            end = len(raw)
+            after = raw[m.end():]
+            stop_pos = None
+            for stop_pat in stop_patterns:
+                sm = re.search(stop_pat, after, flags=re.I)
+                if sm:
+                    candidate = m.end() + sm.start()
+                    if stop_pos is None or candidate < stop_pos:
+                        stop_pos = candidate
+            if stop_pos is not None:
+                end = stop_pos
+            segment = raw[start:end].strip()
+            if len(segment) > len(best):
+                best = segment
+    return best
 
 
 def remaining_expand_in_block(block: Locator) -> int:
@@ -601,11 +583,11 @@ def is_valid_player_name(player_name: str, teams: List[str]) -> bool:
     if not name:
         return False
     key = normalize_for_match(name)
-    if key in {"1+", "2+", "3+", "4+", "afficher plus", "voir plus", "cashout"}:
+    if key in {"1+", "2+", "3+", "4+", "afficher plus", "voir plus", "cashout", "joueurs", "points", "buts", "combos", "score exact", "prolongation", "paris populaires"}:
         return False
     if len(name.split()) < 2:
         return False
-    if "," not in name:
+    if not re.fullmatch(NAME_RE, name):
         return False
     team_keys = {normalize_team_label(t) for t in teams if t}
     name_team_key = normalize_team_label(name)
@@ -703,7 +685,7 @@ def parse_points_rows_from_lines(lines: List[str], teams: List[str]) -> Tuple[Li
 
 def parse_points_rows_from_regex(block_text: str) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]], str]:
     text = norm_spaces(block_text)
-    parts = re.split(r"nombre de points(?: du joueur| - joueur)", text, flags=re.I)
+    parts = re.split(r"nombre de points(?: du joueur| - joueur(?: - match)?)", text, flags=re.I)
     if parts:
         text = norm_spaces(parts[-1])
     text = re.sub(r"^.*?\|\s*", "", text)
@@ -714,6 +696,8 @@ def parse_points_rows_from_regex(block_text: str) -> Tuple[List[Dict[str, str]],
     for m in pattern.finditer(text):
         player_name = norm_spaces(m.group(1))
         odd = norm_spaces(m.group(2))
+        if not is_valid_player_name(player_name, []):
+            continue
         rows.append({
             "team": "",
             "player_name_raw": player_name,
@@ -792,6 +776,7 @@ def main() -> None:
         "players_seen": 0,
         "players_kept_points_1_plus": 0,
         "team_assignment_mode": None,
+        "used_body_text_fallback": False,
         "run_dir": str(run_dir),
         "fatal_error": None,
     }
@@ -885,6 +870,19 @@ def main() -> None:
 
             isolated = isolate_lines(block_text)
             rows, debug_players, team_mode = parse_points_rows(isolated, block_text, teams)
+
+            if not rows:
+                click_all_expand_on_page(page)
+                page.wait_for_timeout(1200)
+                body_text = safe_inner_text(page.locator("body"), timeout=5000)
+                fallback_block_text = extract_points_market_from_page_text(body_text)
+                if fallback_block_text:
+                    write_text(run_dir / "points_market_only_fallback_from_body.txt", fallback_block_text)
+                    summary["used_body_text_fallback"] = True
+                    block_text = fallback_block_text
+                    isolated = isolate_lines(block_text)
+                    rows, debug_players, team_mode = parse_points_rows(isolated, block_text, teams)
+                    summary["see_more_clicks"] = max(int(summary.get("see_more_clicks") or 0), 0)
 
             rows_valid, rows_validation_reason = validate_rows(rows, block_text)
             summary["rows_valid"] = rows_valid
