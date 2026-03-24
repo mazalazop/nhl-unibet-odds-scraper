@@ -115,8 +115,10 @@ def evaluate_event(event: Dict[str, Any], min_rows: int) -> Tuple[bool, List[str
         reasons.append("market_block_not_found")
     if not bool(summary.get("rows_valid")):
         reasons.append(f"rows_invalid:{safe_text(summary.get('rows_validation_reason')) or 'unknown'}")
-    if not bool(summary.get("is_complete_market")):
-        reasons.append("market_not_complete")
+    # Le flag is_complete_market reste utile pour le debug, mais ne doit plus
+    # bloquer l'acceptance à lui seul. Avec le nouveau front Unibet, le bloc
+    # ciblé peut encore contenir du texte "Afficher plus" voisin sans que les
+    # lignes POINTS 1+ soient inexploitables.
 
     if not rows_path_raw:
         reasons.append("missing_rows_path")
@@ -234,6 +236,11 @@ def main() -> None:
                 })
                 accepted_rows.append(enriched)
 
+    reason_counts: Dict[str, int] = {}
+    for event in report_events:
+        for reason in event.get("reasons") or []:
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+
     report = {
         "generated_at_utc": utc_now_iso(),
         "batch_run_dir": str(batch_dir),
@@ -241,7 +248,7 @@ def main() -> None:
         "thresholds": {
             "min_rows_per_event": min_rows,
             "expected_outcome_label": "1 ou plus",
-            "require_complete_market": True,
+            "require_complete_market": False,
             "require_event_page_final_url": True,
         },
         "totals": {
@@ -252,6 +259,7 @@ def main() -> None:
         },
         "accepted_event_urls": [x.get("event_url") for x in report_events if x.get("accepted")],
         "rejected_event_urls": [x.get("event_url") for x in report_events if not x.get("accepted")],
+        "reason_counts": reason_counts,
         "artifacts": {
             "accepted_points_rows_raw_json": str(batch_dir / "accepted_points_rows_raw.json"),
             "acceptance_report_json": str(batch_dir / "acceptance_report.json"),
