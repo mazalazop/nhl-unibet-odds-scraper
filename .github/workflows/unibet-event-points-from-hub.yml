@@ -7,7 +7,7 @@ on:
         description: "URL hub Unibet NHL"
         required: true
         type: string
-        default: "https://www.unibet.fr/sport/hockey-sur-glace/etats-unis/nhl?filter=R%C3%A9sultat&subFilter=R%C3%A9sultat+du+match"
+        default: "https://www.unibet.fr/paris-hockey-sur-glace/etats-unis/nhl"
       headless:
         description: "Lancer Playwright en headless"
         required: true
