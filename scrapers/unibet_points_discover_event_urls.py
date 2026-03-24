@@ -8,42 +8,12 @@ But
 ---
 Découvrir automatiquement les URLs des pages match Unibet depuis le hub NHL.
 
-La stratégie n'est plus limitée aux `a[href]`.
-Le script combine 4 sources, dans cet ordre :
-1. URLs détectées dans les réponses réseau (XHR / fetch / JSON / texte)
-2. URLs détectées dans le HTML du hub
-3. URLs détectées dans les href du DOM
-4. Fallback robuste par clic UI sur les blocs "+ N paris" / marketnumber
+Site cible actuel
+-----------------
+Le hub NHL expose désormais directement des liens match du type :
+- https://www.unibet.fr/paris-hockey-sur-glace/etats-unis/nhl/<event_id>/<event_slug>
 
-Entrées via variables d'environnement
--------------------------------------
-- UNIBET_HUB_URL        : URL du hub à ouvrir
-- PW_HEADLESS           : true / false
-- DISCOVERY_MAX_MATCHES : limite de clics UI (0 = auto)
-
-Sorties
--------
-Dans artifacts/unibet_points_discover_event_urls/<timestamp>/ :
-- discovered_event_urls.json
-- discovered_event_urls.txt
-- page_title.txt
-- final_url.txt
-- cookie_action.txt
-- raw_anchor_links.json
-- raw_anchor_links.txt
-- regex_url_candidates.json
-- regex_url_candidates.txt
-- network_response_index.json
-- network_event_url_candidates.json
-- hub_cards_snapshot.json
-- ui_click_discovery.json
-- filtered_candidate_urls.json
-- filtered_candidate_urls.txt
-- page_source.html
-- hub_screenshot.png
-
-Le format de sortie principal reste compatible avec le workflow existant :
-`discovered_event_urls.json` contient `event_urls`.
+Le script garde un fallback compatible avec l'ancien format /event/... si besoin.
 """
 
 from __future__ import annotations
@@ -61,24 +31,26 @@ from playwright.sync_api import BrowserContext, Page
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
-DEFAULT_HUB_URL = (
-    "https://www.unibet.fr/sport/hockey-sur-glace/etats-unis/nhl"
-    "?filter=R%C3%A9sultat&subFilter=R%C3%A9sultat+du+match"
-)
+DEFAULT_HUB_URL = "https://www.unibet.fr/paris-hockey-sur-glace/etats-unis/nhl"
 ARTIFACTS_ROOT = Path("artifacts") / "unibet_points_discover_event_urls"
-EVENT_URL_PATTERNS = [
-    re.compile(r"https?://(?:www\.)?unibet\.fr/sport/ice-hockey/event/[^\s\"'<>]+\.html", re.I),
-    re.compile(r"https?://(?:www\.)?unibet\.fr/event/[^\s\"'<>]+\.html", re.I),
-    re.compile(r"/(?:sport/ice-hockey/)?event/[^\s\"'<>]+\.html", re.I),
-]
-MARKETNUMBER_SELECTORS: Sequence[str] = (
-    "section.marketnumber[title*='Voir tous les paris']",
-    "section.marketnumber",
-    "[id='cps-marketnumber']",
+CURRENT_EVENT_URL_RE = re.compile(
+    r"https?://(?:www\.)?unibet\.fr/paris-hockey-sur-glace/etats-unis/nhl/\d+/[^\s\"'<>/?#]+/?",
+    re.I,
+)
+LEGACY_EVENT_URL_RE = re.compile(
+    r"https?://(?:www\.)?unibet\.fr/(?:sport/ice-hockey/)?event/[^\s\"'<>]+\.html",
+    re.I,
+)
+RELATIVE_CURRENT_EVENT_URL_RE = re.compile(
+    r"/(?:paris-hockey-sur-glace|sport/hockey-sur-glace)/etats-unis/nhl/\d+/[^\s\"'<>/?#]+/?",
+    re.I,
+)
+RELATIVE_LEGACY_EVENT_URL_RE = re.compile(
+    r"/(?:sport/ice-hockey/)?event/[^\s\"'<>]+\.html",
+    re.I,
 )
 CLICK_WAIT_MS = 9000
-NAV_WAIT_MS = 30000
-SCROLL_WAIT_MS = 1000
+SCROLL_WAIT_MS = 900
 
 
 def now_ts() -> str:
@@ -102,29 +74,25 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def safe_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
 def normalize_url(url: str) -> str:
     raw = safe_text(url)
     if not raw:
         return ""
-
     parsed = urlparse(raw)
     scheme = parsed.scheme or "https"
     netloc = parsed.netloc.lower()
     path = re.sub(r"/+", "/", parsed.path or "/").rstrip("/")
     if not path:
         path = "/"
-
-    query_items = parse_qsl(parsed.query, keep_blank_values=True)
-    query_items = sorted(query_items)
+    query_items = sorted(parse_qsl(parsed.query, keep_blank_values=True))
     query = "&".join(f"{k}={v}" for k, v in query_items)
-
     return urlunparse((scheme, netloc, path, "", query, ""))
-
-
-def safe_text(value: Any) -> str:
-    if value is None:
-        return ""
-    return str(value).strip()
 
 
 def ensure_dir(path: Path) -> None:
@@ -159,12 +127,12 @@ def extract_event_urls_from_text(text: str, base_url: str) -> List[str]:
     if not text:
         return found
 
-    for pattern in EVENT_URL_PATTERNS:
+    for pattern in (CURRENT_EVENT_URL_RE, LEGACY_EVENT_URL_RE):
+        found.extend(pattern.findall(text))
+
+    for pattern in (RELATIVE_CURRENT_EVENT_URL_RE, RELATIVE_LEGACY_EVENT_URL_RE):
         for match in pattern.findall(text):
-            if match.startswith("/"):
-                found.append(urljoin(base_url, match))
-            else:
-                found.append(match)
+            found.append(urljoin(base_url, match))
 
     return dedupe_keep_order(found)
 
@@ -178,20 +146,22 @@ def looks_like_unibet_event_url(url: str) -> bool:
         return False
     if not parsed.netloc.endswith("unibet.fr"):
         return False
-    path = (parsed.path or "").lower()
-    return "/event/" in path and path.endswith(".html")
+    path = (parsed.path or "").lower().rstrip("/")
+    if re.search(r"/paris-hockey-sur-glace/etats-unis/nhl/\d+/[^/]+$", path):
+        return True
+    if "/event/" in path and path.endswith(".html"):
+        return True
+    return False
 
 
 def collect_anchor_links(page: Page) -> List[Dict[str, str]]:
     try:
         raw = page.evaluate(
             """
-            () => {
-              return Array.from(document.querySelectorAll('a[href]')).map(a => ({
-                href: a.href || "",
-                text: (a.innerText || a.textContent || "").trim()
-              }));
-            }
+            () => Array.from(document.querySelectorAll('a[href]')).map(a => ({
+              href: a.href || '',
+              text: (a.innerText || a.textContent || '').trim()
+            }))
             """
         )
     except Exception:
@@ -201,17 +171,11 @@ def collect_anchor_links(page: Page) -> List[Dict[str, str]]:
     if isinstance(raw, list):
         for item in raw:
             if isinstance(item, dict):
-                output.append(
-                    {
-                        "href": safe_text(item.get("href")),
-                        "text": safe_text(item.get("text")),
-                    }
-                )
+                output.append({
+                    "href": safe_text(item.get("href")),
+                    "text": safe_text(item.get("text")),
+                })
     return output
-
-
-def collect_regex_urls_from_html(html: str, base_url: str) -> List[str]:
-    return extract_event_urls_from_text(html, base_url=base_url)
 
 
 def try_accept_cookies(page: Page) -> str:
@@ -225,18 +189,16 @@ def try_accept_cookies(page: Page) -> str:
         "Allow all",
         "Accept all",
     ]
-
     for label in candidates:
         for role in ("button", "link"):
             try:
-                locator = page.get_by_role(role, name=label, exact=False)
-                if locator.count() > 0:
-                    locator.first.click(timeout=2500)
+                loc = page.get_by_role(role, name=label, exact=False)
+                if loc.count() > 0:
+                    loc.first.click(timeout=2500)
                     page.wait_for_timeout(1200)
                     return f"{role}:{label}"
             except Exception:
                 continue
-
     return "none"
 
 
@@ -254,19 +216,47 @@ def safe_page_url(page: Page) -> str:
         return ""
 
 
+def collect_event_links_snapshot(page: Page) -> List[Dict[str, Any]]:
+    try:
+        raw = page.evaluate(
+            """
+            () => {
+              const anchors = Array.from(document.querySelectorAll('a[href]'));
+              const rows = [];
+              for (const a of anchors) {
+                const href = a.href || '';
+                if (!/\/paris-hockey-sur-glace\/etats-unis\/nhl\/\d+\//i.test(href)) continue;
+                rows.push({
+                  href,
+                  text: (a.innerText || a.textContent || '').trim(),
+                  aria_label: (a.getAttribute('aria-label') || '').trim(),
+                  title: (a.getAttribute('title') || '').trim(),
+                });
+              }
+              return rows;
+            }
+            """
+        )
+    except Exception:
+        return []
+    if isinstance(raw, list):
+        return [x for x in raw if isinstance(x, dict)]
+    return []
+
+
 def settle_hub_page(page: Page, hub_url: str) -> Dict[str, Any]:
     try:
         page.goto(hub_url, wait_until="domcontentloaded", timeout=90000)
     except PlaywrightTimeoutError:
         pass
 
-    page.wait_for_timeout(4000)
+    page.wait_for_timeout(3500)
     cookie_action = try_accept_cookies(page)
-    page.wait_for_timeout(1500)
+    page.wait_for_timeout(1200)
 
     counts: List[int] = []
     for _ in range(12):
-        counts.append(count_market_buttons(page))
+        counts.append(count_event_links(page))
         try:
             page.mouse.wheel(0, 2600)
         except Exception:
@@ -274,82 +264,44 @@ def settle_hub_page(page: Page, hub_url: str) -> Dict[str, Any]:
         page.wait_for_timeout(SCROLL_WAIT_MS)
 
     try:
-        page.wait_for_load_state("networkidle", timeout=15000)
+        page.wait_for_load_state("networkidle", timeout=12000)
     except Exception:
         pass
-    page.wait_for_timeout(2500)
+    page.wait_for_timeout(1600)
 
     return {
         "cookie_action": cookie_action,
-        "market_button_counts_during_scroll": counts,
-        "final_market_button_count": count_market_buttons(page),
+        "event_link_counts_during_scroll": counts,
+        "final_event_link_count": count_event_links(page),
     }
 
 
-def count_market_buttons(page: Page) -> int:
-    for selector in MARKETNUMBER_SELECTORS:
-        try:
-            count = page.locator(selector).count()
-            if count > 0:
-                return count
-        except Exception:
-            continue
-    return 0
-
-
-def market_button_locator(page: Page):
-    for selector in MARKETNUMBER_SELECTORS:
-        try:
-            locator = page.locator(selector)
-            if locator.count() > 0:
-                return locator
-        except Exception:
-            continue
-    return page.locator("section.marketnumber")
-
-
-def snapshot_hub_cards(page: Page) -> List[Dict[str, Any]]:
+def count_event_links(page: Page) -> int:
     try:
-        raw = page.evaluate(
-            """
-            () => {
-              const cards = Array.from(document.querySelectorAll('.eventcard--toplight'));
-              return cards.map((card, idx) => {
-                const teams = Array.from(card.querySelectorAll('h2')).map(el => (el.innerText || '').trim()).filter(Boolean);
-                const league = (card.querySelector('.eventcard-header-title span:last-child')?.innerText || '').trim();
-                const meta = (card.querySelector('.eventcard-header-meta')?.innerText || '').trim();
-                const marketText = (card.querySelector('section.marketnumber')?.innerText || '').trim();
-                const title = (card.querySelector('section.marketnumber')?.getAttribute('title') || '').trim();
-                return { index: idx, teams, league, meta, market_text: marketText, market_title: title };
-              });
-            }
-            """
+        return page.locator("a[href]").evaluate_all(
+            "els => els.filter(a => /\\/paris-hockey-sur-glace\\/etats-unis\\/nhl\\/\\d+\\//i.test(a.href || '')).length"
         )
     except Exception:
-        return []
+        return 0
 
-    if isinstance(raw, list):
-        return [item for item in raw if isinstance(item, dict)]
-    return []
+
+def event_link_locator(page: Page):
+    return page.locator("a[href*='/paris-hockey-sur-glace/etats-unis/nhl/']")
 
 
 def harvest_from_json_like(value: Any, base_url: str, out: List[str]) -> None:
     if value is None:
         return
-
     if isinstance(value, dict):
         for nested in value.values():
             harvest_from_json_like(nested, base_url, out)
         return
-
     if isinstance(value, (list, tuple)):
         for nested in value:
             harvest_from_json_like(nested, base_url, out)
         return
-
     if isinstance(value, str):
         out.extend(extract_event_urls_from_text(value, base_url=base_url))
-        return
 
 
 def build_network_listeners(page: Page, base_url: str, out_dir: Path):
@@ -363,14 +315,12 @@ def build_network_listeners(page: Page, base_url: str, out_dir: Path):
             resource_type = safe_text(response.request.resource_type)
         except Exception:
             resource_type = ""
-
         url = safe_text(response.url)
         content_type = ""
         try:
             content_type = safe_text(response.headers.get("content-type", ""))
         except Exception:
             content_type = ""
-
         if not url:
             return
 
@@ -378,7 +328,7 @@ def build_network_listeners(page: Page, base_url: str, out_dir: Path):
             resource_type in {"xhr", "fetch", "document"}
             or "json" in content_type.lower()
             or "graphql" in url.lower()
-            or "event" in url.lower()
+            or "/nhl/" in url.lower()
         )
         if not relevant:
             return
@@ -392,7 +342,6 @@ def build_network_listeners(page: Page, base_url: str, out_dir: Path):
             "body_saved": False,
             "body_path": "",
         }
-
         try:
             record["status"] = int(response.status)
         except Exception:
@@ -429,6 +378,7 @@ def build_network_listeners(page: Page, base_url: str, out_dir: Path):
                     if extra_urls:
                         harvested_urls.extend(extra_urls)
                         record["harvested_event_urls"].extend(extra_urls)
+
         response_records.append(record)
 
     page.on("response", on_response)
@@ -438,10 +388,9 @@ def build_network_listeners(page: Page, base_url: str, out_dir: Path):
 def click_target_and_capture_event_url(context: BrowserContext, page: Page, target_index: int) -> Dict[str, Any]:
     attempt: Dict[str, Any] = {
         "target_index": target_index,
-        "button_count": 0,
+        "link_count": 0,
         "hub_url_before_click": safe_page_url(page),
-        "teams": [],
-        "market_text": "",
+        "anchor_text": "",
         "clicked": False,
         "navigation_mode": "none",
         "event_url": "",
@@ -449,35 +398,32 @@ def click_target_and_capture_event_url(context: BrowserContext, page: Page, targ
         "error": "",
     }
 
-    locator = market_button_locator(page)
+    locator = event_link_locator(page)
     try:
-        button_count = locator.count()
+        link_count = locator.count()
     except Exception:
-        button_count = 0
-    attempt["button_count"] = button_count
+        link_count = 0
+    attempt["link_count"] = link_count
 
-    if target_index >= button_count:
-        attempt["error"] = f"index {target_index} >= button_count {button_count}"
+    if target_index >= link_count:
+        attempt["error"] = f"index {target_index} >= link_count {link_count}"
         return attempt
 
     target = locator.nth(target_index)
     try:
-        attempt["teams"] = target.evaluate(
-            """
-            (el) => {
-              const card = el.closest('.eventcard--toplight');
-              if (!card) return [];
-              return Array.from(card.querySelectorAll('h2')).map(x => (x.innerText || '').trim()).filter(Boolean);
-            }
-            """
-        )
+        attempt["anchor_text"] = safe_text(target.inner_text())
     except Exception:
-        attempt["teams"] = []
+        attempt["anchor_text"] = ""
 
     try:
-        attempt["market_text"] = safe_text(target.inner_text())
+        href = safe_text(target.get_attribute("href"))
+        candidate = normalize_url(urljoin(safe_page_url(page), href))
+        if looks_like_unibet_event_url(candidate):
+            attempt["event_url"] = candidate
+            attempt["navigation_mode"] = "href_extract"
+            return attempt
     except Exception:
-        attempt["market_text"] = ""
+        pass
 
     try:
         target.scroll_into_view_if_needed(timeout=5000)
@@ -485,10 +431,8 @@ def click_target_and_capture_event_url(context: BrowserContext, page: Page, targ
     except Exception:
         pass
 
-    existing_pages = list(context.pages)
-    existing_page_ids = {id(p) for p in existing_pages}
+    existing_page_ids = {id(p) for p in context.pages}
     original_url = safe_page_url(page)
-
     click_errors: List[str] = []
     for mode in ("normal", "force", "dom_click"):
         try:
@@ -503,7 +447,7 @@ def click_target_and_capture_event_url(context: BrowserContext, page: Page, targ
             break
         except Exception as exc:
             click_errors.append(f"{mode}:{exc}")
-            page.wait_for_timeout(600)
+            page.wait_for_timeout(500)
 
     if not attempt["clicked"]:
         attempt["error"] = " | ".join(click_errors)[:4000]
@@ -512,14 +456,12 @@ def click_target_and_capture_event_url(context: BrowserContext, page: Page, targ
     deadline = time.time() + (CLICK_WAIT_MS / 1000.0)
     captured_url = ""
     current_target_page: Optional[Page] = None
-
     while time.time() < deadline:
         current_url = safe_page_url(page)
         if current_url and current_url != original_url and looks_like_unibet_event_url(current_url):
             captured_url = current_url
             current_target_page = page
             break
-
         for opened in context.pages:
             if id(opened) in existing_page_ids:
                 continue
@@ -530,7 +472,6 @@ def click_target_and_capture_event_url(context: BrowserContext, page: Page, targ
                 break
         if captured_url:
             break
-
         page.wait_for_timeout(400)
 
     if current_target_page is not None:
@@ -542,15 +483,14 @@ def click_target_and_capture_event_url(context: BrowserContext, page: Page, targ
 
     attempt["event_url"] = normalize_url(captured_url)
 
-    # Nettoyage : revenir au hub si navigation same-tab, fermer si popup.
     if current_target_page is page and captured_url:
         try:
-            page.go_back(wait_until="domcontentloaded", timeout=NAV_WAIT_MS)
-            page.wait_for_timeout(1500)
+            page.go_back(wait_until="domcontentloaded", timeout=20000)
+            page.wait_for_timeout(1200)
         except Exception:
             try:
-                page.goto(original_url, wait_until="domcontentloaded", timeout=NAV_WAIT_MS)
-                page.wait_for_timeout(1500)
+                page.goto(original_url, wait_until="domcontentloaded", timeout=20000)
+                page.wait_for_timeout(1200)
             except Exception:
                 pass
     elif current_target_page is not None and current_target_page is not page:
@@ -564,13 +504,10 @@ def click_target_and_capture_event_url(context: BrowserContext, page: Page, targ
 
 def discover_by_ui_clicks(context: BrowserContext, page: Page, hub_url: str, out_dir: Path, max_matches: int) -> Tuple[List[str], List[Dict[str, Any]]]:
     prep = settle_hub_page(page, hub_url)
-    cards_snapshot = snapshot_hub_cards(page)
-    write_json(out_dir / "hub_cards_snapshot.json", {
-        "prep": prep,
-        "cards": cards_snapshot,
-    })
+    cards_snapshot = collect_event_links_snapshot(page)
+    write_json(out_dir / "hub_cards_snapshot.json", {"prep": prep, "cards": cards_snapshot})
 
-    initial_count = count_market_buttons(page)
+    initial_count = count_event_links(page)
     if max_matches <= 0:
         max_matches = initial_count
     else:
@@ -578,7 +515,6 @@ def discover_by_ui_clicks(context: BrowserContext, page: Page, hub_url: str, out
 
     attempts: List[Dict[str, Any]] = []
     event_urls: List[str] = []
-
     for index in range(max_matches):
         settle_hub_page(page, hub_url)
         attempt = click_target_and_capture_event_url(context=context, page=page, target_index=index)
@@ -586,10 +522,7 @@ def discover_by_ui_clicks(context: BrowserContext, page: Page, hub_url: str, out
         if attempt.get("event_url"):
             event_urls.append(attempt["event_url"])
 
-    write_json(out_dir / "ui_click_discovery.json", {
-        "attempt_count": len(attempts),
-        "attempts": attempts,
-    })
+    write_json(out_dir / "ui_click_discovery.json", {"attempt_count": len(attempts), "attempts": attempts})
     return dedupe_keep_order(event_urls), attempts
 
 
@@ -617,11 +550,10 @@ def main() -> None:
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=headless)
-        context = browser.new_context(viewport={"width": 1440, "height": 2200})
+        context = browser.new_context(viewport={"width": 1440, "height": 2400})
         page = context.new_page()
 
         response_records, harvested_urls_from_network = build_network_listeners(page=page, base_url=hub_url, out_dir=out_dir)
-
         prep = settle_hub_page(page, hub_url)
         cookie_action = safe_text(prep.get("cookie_action")) or "none"
 
@@ -644,17 +576,11 @@ def main() -> None:
         (out_dir / "cookie_action.txt").write_text(cookie_action + "\n", encoding="utf-8")
 
         raw_anchor_links = collect_anchor_links(page)
-        raw_anchor_links_sorted = sorted(
-            raw_anchor_links,
-            key=lambda x: (safe_text(x.get("href")), safe_text(x.get("text"))),
-        )
+        raw_anchor_links_sorted = sorted(raw_anchor_links, key=lambda x: (safe_text(x.get("href")), safe_text(x.get("text"))))
         write_json(out_dir / "raw_anchor_links.json", raw_anchor_links_sorted)
-        write_lines(
-            out_dir / "raw_anchor_links.txt",
-            [f"{safe_text(item.get('href'))}\t{safe_text(item.get('text'))}" for item in raw_anchor_links_sorted],
-        )
+        write_lines(out_dir / "raw_anchor_links.txt", [f"{safe_text(item.get('href'))}\t{safe_text(item.get('text'))}" for item in raw_anchor_links_sorted])
 
-        regex_candidates = dedupe_keep_order(collect_regex_urls_from_html(html, final_url or hub_url))
+        regex_candidates = dedupe_keep_order(extract_event_urls_from_text(html, final_url or hub_url))
         write_json(out_dir / "regex_url_candidates.json", regex_candidates)
         write_lines(out_dir / "regex_url_candidates.txt", regex_candidates)
 
@@ -662,13 +588,7 @@ def main() -> None:
         write_json(out_dir / "network_response_index.json", response_records)
         write_json(out_dir / "network_event_url_candidates.json", network_candidates)
 
-        ui_candidates, _ = discover_by_ui_clicks(
-            context=context,
-            page=page,
-            hub_url=hub_url,
-            out_dir=out_dir,
-            max_matches=max_matches,
-        )
+        ui_candidates, _ = discover_by_ui_clicks(context=context, page=page, hub_url=hub_url, out_dir=out_dir, max_matches=max_matches)
 
         filtered_candidates = dedupe_keep_order(
             [safe_text(item.get("href")) for item in raw_anchor_links_sorted]
@@ -706,10 +626,8 @@ def main() -> None:
                 "filtered_candidate_urls_json": str(out_dir / "filtered_candidate_urls.json"),
             },
         }
-
         write_json(out_dir / "discovered_event_urls.json", payload)
         write_lines(out_dir / "discovered_event_urls.txt", filtered_candidates)
-
         browser.close()
 
     print(f"Discovered URLs      : {len(filtered_candidates)}")
@@ -720,6 +638,7 @@ def main() -> None:
         print("")
         print("Aucune URL event découverte.")
         print("Consulte en priorité :")
+        print(f"- {out_dir / 'raw_anchor_links.json'}")
         print(f"- {out_dir / 'network_event_url_candidates.json'}")
         print(f"- {out_dir / 'hub_cards_snapshot.json'}")
         print(f"- {out_dir / 'ui_click_discovery.json'}")
