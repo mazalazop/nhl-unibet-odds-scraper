@@ -1,38 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-scrapers/unibet_event_points_normalize_accepted.py
-
-Objectif
---------
-Normaliser les lignes acceptées du marché Unibet POINTS 1+ dans un format
-stable pour la suite du pipeline (matching modèle -> bookmaker).
-
-Entrées via variables d'environnement
--------------------------------------
-- ACCEPTANCE_REPORT_PATH : chemin vers acceptance_report.json
-
-Sorties
--------
-Dans le même dossier batch :
-- normalized_points_odds.json
-
-Schéma métier
--------------
-Chaque ligne normalisée contient notamment :
-- bookmaker = Unibet
-- market = player_points
-- stat = points
-- threshold = 1
-- outcome_label = 1 ou plus
-- odds_decimal
-- implied_probability
-- event_url / event_id / event_slug
-- home_team / away_team / team
-- player_name + version normalisée
-"""
-
 from __future__ import annotations
 
 import json
@@ -43,7 +11,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
-
 
 BOOKMAKER_NAME = "Unibet"
 MARKET_NAME = "player_points"
@@ -87,6 +54,9 @@ def parse_decimal_odd(value: Any) -> float:
 
 def extract_event_id(event_url: str) -> Optional[str]:
     path = urlparse(event_url).path or ""
+    m = re.search(r"/paris-hockey-sur-glace/etats-unis/nhl/(\d+)/[^/]+/?$", path, re.I)
+    if m:
+        return m.group(1)
     m = re.search(r"-(\d+_\d+)\.html$", path, re.I)
     if m:
         return m.group(1)
