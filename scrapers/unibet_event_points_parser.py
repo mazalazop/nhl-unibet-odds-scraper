@@ -269,11 +269,11 @@ def select_exact_points_market_block(page: Page, teams: List[str]) -> Dict[str, 
         "marker_value": MARKET_MARKER_VALUE,
     }
     result = page.evaluate(
-        """
+        r"""
         (cfg) => {
           const normalize = (value) => String(value || '')
             .normalize('NFD')
-            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/[̀-ͯ]/g, '')
             .toLowerCase()
             .replace(/\s+/g, ' ')
             .trim();
@@ -291,68 +291,109 @@ def select_exact_points_market_block(page: Page, teams: List[str]) -> Dict[str, 
           const markerAttr = cfg.marker_attr;
           const markerValue = cfg.marker_value;
           const teamNames = (cfg.team_names || []).map(normalize).filter(Boolean);
+          const nameRe = /[A-Za-zÀ-ÿ'’\-. ]+,\s*[A-Za-zÀ-ÿ'’\-. ]+/g;
           const all = Array.from(document.querySelectorAll('div, section, article, li'));
 
           for (const prev of Array.from(document.querySelectorAll(`[${markerAttr}]`))) {
             prev.removeAttribute(markerAttr);
           }
 
-          const candidates = [];
+          const seedElements = [];
           for (const el of all) {
-            const raw = el.innerText || '';
-            const text = normalize(raw);
+            const text = normalize(el.innerText || '');
             if (!text) continue;
             if (!text.includes('nombre de points')) continue;
             if (!text.includes('joueur')) continue;
+            seedElements.push(el);
+          }
 
-            const ownText = cleanOwnText(el);
-            const startsWithPoints = text.startsWith('nombre de points');
-            const ownStartsWithPoints = ownText.startsWith('nombre de points');
-            const onePlusHits = countMatches(text, /(?:^|\s)1\+(?:\s|$)/g);
-            const showMoreHits = countMatches(text, /afficher plus|voir plus/g);
-            const butsHits = countMatches(text, /nombre de buts - joueur/g);
-            const passesHits = countMatches(text, /nombre de passes decisives - joueur/g);
-            const teamHits = teamNames.filter(x => text.includes(x)).length;
-            const lineCount = raw.split(/\n+/).map(x => x.trim()).filter(Boolean).length;
-            const textLength = text.length;
-            const oddCount = countMatches(text, /\b\d+(?:[.,]\d+)?\b/g);
-            const headerMatch = targetLabels.some(lbl => text.startsWith(lbl));
+          const dedupe = new Set();
+          const candidates = [];
+          for (const seed of seedElements) {
+            const chain = [seed];
+            let parent = seed.parentElement;
+            let hops = 0;
+            while (parent && hops < 6) {
+              chain.push(parent);
+              parent = parent.parentElement;
+              hops += 1;
+            }
 
-            let score = 0;
-            if (headerMatch) score += 180;
-            if (startsWithPoints) score += 120;
-            if (ownStartsWithPoints) score += 140;
-            if (onePlusHits >= 4) score += 60;
-            if (teamHits >= 1) score += 20;
-            if (oddCount >= 8) score += 20;
-            if (lineCount >= 6 && lineCount <= 120) score += 20;
-            if (textLength >= 100 && textLength <= 3500) score += 20;
-            if (showMoreHits <= 4) score += 15;
-            score -= butsHits * 120;
-            score -= passesHits * 120;
-            if (textLength > 6000) score -= 150;
-            if (lineCount > 180) score -= 120;
+            for (const el of chain) {
+              const key = `${el.tagName}|${Math.round(el.getBoundingClientRect().top)}|${Math.round(el.getBoundingClientRect().height)}|${Math.round(el.getBoundingClientRect().width)}|${normalize((el.innerText || '').slice(0, 180))}`;
+              if (dedupe.has(key)) continue;
+              dedupe.add(key);
 
-            candidates.push({
-              tag: el.tagName,
-              text_length: textLength,
-              line_count: lineCount,
-              odd_count: oddCount,
-              one_plus_hits: onePlusHits,
-              show_more_hits: showMoreHits,
-              team_hits: teamHits,
-              buts_hits: butsHits,
-              passes_hits: passesHits,
-              starts_with_points: startsWithPoints,
-              own_starts_with_points: ownStartsWithPoints,
-              score,
-              preview: raw.slice(0, 700),
-              element: el,
-            });
+              const raw = el.innerText || '';
+              const text = normalize(raw);
+              if (!text) continue;
+              if (!text.includes('nombre de points')) continue;
+              if (!text.includes('joueur')) continue;
+
+              const ownText = cleanOwnText(el);
+              const startsWithPoints = text.startsWith('nombre de points');
+              const ownStartsWithPoints = ownText.startsWith('nombre de points');
+              const onePlusHits = countMatches(text, /(?:^|\s)1\+(?:\s|$)/g);
+              const showMoreHits = countMatches(text, /afficher plus|voir plus/g);
+              const butsHits = countMatches(text, /nombre de buts - joueur/g);
+              const passesHits = countMatches(text, /nombre de passes decisives - joueur/g);
+              const teamHits = teamNames.filter(x => text.includes(x)).length;
+              const lineCount = raw.split(/
++/).map(x => x.trim()).filter(Boolean).length;
+              const textLength = text.length;
+              const oddCount = countMatches(text, /\d+(?:[.,]\d+)?/g);
+              const playerHits = countMatches(raw, nameRe);
+              const headerMatch = targetLabels.some(lbl => text.startsWith(lbl) || text.includes(lbl));
+
+              let score = 0;
+              if (headerMatch) score += 120;
+              if (startsWithPoints) score += 60;
+              if (ownStartsWithPoints) score += 25;
+              score += Math.min(onePlusHits, 20) * 18;
+              score += Math.min(playerHits, 20) * 22;
+              score += Math.min(oddCount, 80) * 2;
+              score += Math.min(teamHits, 2) * 10;
+              if (showMoreHits >= 1 && showMoreHits <= 4) score += 15;
+              if (lineCount >= 6 && lineCount <= 140) score += 20;
+              if (textLength >= 120 && textLength <= 5000) score += 20;
+
+              if (playerHits === 0) score -= 140;
+              if (onePlusHits === 0) score -= 140;
+              if (oddCount < 4) score -= 100;
+              if (textLength < 120) score -= 120;
+              if (lineCount < 4) score -= 120;
+              if (ownStartsWithPoints && textLength < 120) score -= 180;
+              if (ownStartsWithPoints && playerHits === 0) score -= 160;
+              score -= butsHits * 150;
+              score -= passesHits * 150;
+              if (textLength > 7000) score -= 180;
+              if (lineCount > 220) score -= 140;
+
+              candidates.push({
+                tag: el.tagName,
+                text_length: textLength,
+                line_count: lineCount,
+                odd_count: oddCount,
+                player_hits: playerHits,
+                one_plus_hits: onePlusHits,
+                show_more_hits: showMoreHits,
+                team_hits: teamHits,
+                buts_hits: butsHits,
+                passes_hits: passesHits,
+                starts_with_points: startsWithPoints,
+                own_starts_with_points: ownStartsWithPoints,
+                score,
+                preview: raw.slice(0, 900),
+                element: el,
+              });
+            }
           }
 
           candidates.sort((a, b) => {
             if (b.score !== a.score) return b.score - a.score;
+            if (b.player_hits !== a.player_hits) return b.player_hits - a.player_hits;
+            if (b.one_plus_hits !== a.one_plus_hits) return b.one_plus_hits - a.one_plus_hits;
+            if (b.odd_count !== a.odd_count) return b.odd_count - a.odd_count;
             if (a.text_length !== b.text_length) return a.text_length - b.text_length;
             return a.line_count - b.line_count;
           });
@@ -362,6 +403,7 @@ def select_exact_points_market_block(page: Page, teams: List[str]) -> Dict[str, 
             text_length: c.text_length,
             line_count: c.line_count,
             odd_count: c.odd_count,
+            player_hits: c.player_hits,
             one_plus_hits: c.one_plus_hits,
             show_more_hits: c.show_more_hits,
             team_hits: c.team_hits,
@@ -377,24 +419,29 @@ def select_exact_points_market_block(page: Page, teams: List[str]) -> Dict[str, 
             return {found: false, selected: null, top_candidates: top};
           }
 
-          const best = candidates[0];
-          best.element.setAttribute(markerAttr, markerValue);
+          const viable = candidates.find(c => c.player_hits >= 1 && c.one_plus_hits >= 1 && c.odd_count >= 4);
+          if (!viable) {
+            return {found: false, selected: null, top_candidates: top};
+          }
+
+          viable.element.setAttribute(markerAttr, markerValue);
           return {
             found: true,
             selected: {
-              tag: best.tag,
-              text_length: best.text_length,
-              line_count: best.line_count,
-              odd_count: best.odd_count,
-              one_plus_hits: best.one_plus_hits,
-              show_more_hits: best.show_more_hits,
-              team_hits: best.team_hits,
-              buts_hits: best.buts_hits,
-              passes_hits: best.passes_hits,
-              starts_with_points: best.starts_with_points,
-              own_starts_with_points: best.own_starts_with_points,
-              score: best.score,
-              preview: best.preview,
+              tag: viable.tag,
+              text_length: viable.text_length,
+              line_count: viable.line_count,
+              odd_count: viable.odd_count,
+              player_hits: viable.player_hits,
+              one_plus_hits: viable.one_plus_hits,
+              show_more_hits: viable.show_more_hits,
+              team_hits: viable.team_hits,
+              buts_hits: viable.buts_hits,
+              passes_hits: viable.passes_hits,
+              starts_with_points: viable.starts_with_points,
+              own_starts_with_points: viable.own_starts_with_points,
+              score: viable.score,
+              preview: viable.preview,
             },
             top_candidates: top,
           };
