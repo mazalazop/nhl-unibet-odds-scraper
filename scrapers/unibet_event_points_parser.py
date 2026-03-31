@@ -1,6 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+scrapers/unibet_event_points_parser.py
+
+Objectif
+--------
+Parser proprement le marché Unibet :
+- NOMBRE DE POINTS - JOUEUR
+
+Règle métier
+------------
+- garder uniquement l'issue : "1 ou plus"
+- ignorer complètement : "2+", "3+", "4+"
+- cliquer les boutons "Afficher plus" / "Voir plus" dans le bloc ciblé seulement
+"""
+
 from __future__ import annotations
 
 import json
@@ -26,6 +41,8 @@ POINTS_BLOCK_LABEL_CANDIDATES = [
 ]
 PRIMARY_TAB_LABEL_CANDIDATES = ["Joueurs", "Points", "Joueur"]
 SECONDARY_TAB_LABEL_CANDIDATES = ["Points", "Joueurs"]
+MARKET_MARKER_ATTR = "data-oai-points-market-target"
+MARKET_MARKER_VALUE = "1"
 ARTIFACTS_ROOT = Path("artifacts") / "unibet_event_points_parser"
 NAME_RE = r"[A-ZÀ-Ý][A-Za-zÀ-ÿ'’\-.]+(?:,\s*[A-ZÀ-Ý][A-Za-zÀ-ÿ'’\-.]+|(?:\s+[A-ZÀ-Ý][A-Za-zÀ-ÿ'’\-.]+){1,2})"
 
@@ -73,6 +90,16 @@ def safe_inner_text(locator: Locator, timeout: int = 1000) -> str:
         return ""
 
 
+def safe_count(locator: Locator, max_count: Optional[int] = None) -> int:
+    try:
+        c = locator.count()
+        if max_count is not None:
+            return min(c, max_count)
+        return c
+    except Exception:
+        return 0
+
+
 def dedupe_keep_order(items: List[str]) -> List[str]:
     out: List[str] = []
     seen = set()
@@ -115,7 +142,22 @@ def extract_teams_from_url(event_url: str) -> List[str]:
         slug = m.group(1)
         if "-vs-" in slug:
             left, right = slug.split("-vs-", 1)
-            return dedupe_keep_order([left.replace("-", " "), right.replace("-", " ")])
+            return dedupe_keep_order([
+                left.replace("-", " "),
+                right.replace("-", " "),
+            ])
+    m = re.search(r"/event/([^/]+?)-\d+_\d+\.html$", path, re.I)
+    if not m:
+        m = re.search(r"/event/([^/]+)\.html$", path, re.I)
+    if m:
+        slug = m.group(1)
+        parts = [p for p in slug.split("-") if p]
+        if len(parts) >= 4:
+            half = len(parts) // 2
+            return dedupe_keep_order([
+                " ".join(parts[:half]).replace("_", " "),
+                " ".join(parts[half:]).replace("_", " "),
+            ])
     return []
 
 
@@ -139,8 +181,7 @@ def extract_teams_from_h1(page: Page) -> List[str]:
     for sel in selectors:
         try:
             loc = page.locator(sel)
-            count = min(loc.count(), 10)
-            for i in range(count):
+            for i in range(safe_count(loc, 10)):
                 txt = safe_inner_text(loc.nth(i))
                 if looks_like_matchup(txt):
                     teams = split_matchup_text(txt)
@@ -194,7 +235,7 @@ def click_label(page: Page, label: str) -> bool:
     ]
     for loc in candidates:
         try:
-            if loc.count() == 0:
+            if safe_count(loc) == 0:
                 continue
             target = loc.first
             if target.is_visible(timeout=2500):
@@ -222,7 +263,192 @@ def small_scroll(page: Page, rounds: int = 3, pixels: int = 1200, wait_ms: int =
         page.wait_for_timeout(wait_ms)
 
 
-def click_all_expand_on_page(page: Page, max_rounds: int = 8) -> int:
+def select_exact_points_market_block(page: Page, teams: List[str]) -> Dict[str, Any]:
+    payload = {
+        "labels": POINTS_BLOCK_LABEL_CANDIDATES,
+        "team_names": teams,
+        "marker_attr": MARKET_MARKER_ATTR,
+        "marker_value": MARKET_MARKER_VALUE,
+    }
+    result = page.evaluate(
+        """
+        (cfg) => {
+          const normalize = (value) => String(value || '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/\s+/g, ' ')
+            .trim();
+
+          const cleanOwnText = (el) => {
+            const chunks = [];
+            for (const node of Array.from(el.childNodes || [])) {
+              if (node && node.nodeType === Node.TEXT_NODE) chunks.push(node.textContent || '');
+            }
+            return normalize(chunks.join(' '));
+          };
+
+          const countMatches = (text, re) => (text.match(re) || []).length;
+          const targetLabels = (cfg.labels || []).map(normalize).filter(Boolean);
+          const markerAttr = cfg.marker_attr;
+          const markerValue = cfg.marker_value;
+          const teamNames = (cfg.team_names || []).map(normalize).filter(Boolean);
+          const all = Array.from(document.querySelectorAll('div, section, article, li'));
+
+          for (const prev of Array.from(document.querySelectorAll(`[${markerAttr}]`))) {
+            prev.removeAttribute(markerAttr);
+          }
+
+          const candidates = [];
+          for (const el of all) {
+            const raw = el.innerText || '';
+            const text = normalize(raw);
+            if (!text) continue;
+            if (!text.includes('nombre de points')) continue;
+            if (!text.includes('joueur')) continue;
+
+            const ownText = cleanOwnText(el);
+            const startsWithPoints = text.startsWith('nombre de points');
+            const ownStartsWithPoints = ownText.startsWith('nombre de points');
+            const onePlusHits = countMatches(text, /(?:^|\s)1\+(?:\s|$)/g);
+            const showMoreHits = countMatches(text, /afficher plus|voir plus/g);
+            const butsHits = countMatches(text, /nombre de buts - joueur/g);
+            const passesHits = countMatches(text, /nombre de passes decisives - joueur/g);
+            const teamHits = teamNames.filter(x => text.includes(x)).length;
+            const lineCount = raw.split(/\n+/).map(x => x.trim()).filter(Boolean).length;
+            const textLength = text.length;
+            const oddCount = countMatches(text, /\b\d+(?:[.,]\d+)?\b/g);
+            const headerMatch = targetLabels.some(lbl => text.startsWith(lbl));
+
+            let score = 0;
+            if (headerMatch) score += 180;
+            if (startsWithPoints) score += 120;
+            if (ownStartsWithPoints) score += 140;
+            if (onePlusHits >= 4) score += 60;
+            if (teamHits >= 1) score += 20;
+            if (oddCount >= 8) score += 20;
+            if (lineCount >= 6 && lineCount <= 120) score += 20;
+            if (textLength >= 100 && textLength <= 3500) score += 20;
+            if (showMoreHits <= 4) score += 15;
+            score -= butsHits * 120;
+            score -= passesHits * 120;
+            if (textLength > 6000) score -= 150;
+            if (lineCount > 180) score -= 120;
+
+            candidates.push({
+              tag: el.tagName,
+              text_length: textLength,
+              line_count: lineCount,
+              odd_count: oddCount,
+              one_plus_hits: onePlusHits,
+              show_more_hits: showMoreHits,
+              team_hits: teamHits,
+              buts_hits: butsHits,
+              passes_hits: passesHits,
+              starts_with_points: startsWithPoints,
+              own_starts_with_points: ownStartsWithPoints,
+              score,
+              preview: raw.slice(0, 700),
+              element: el,
+            });
+          }
+
+          candidates.sort((a, b) => {
+            if (b.score !== a.score) return b.score - a.score;
+            if (a.text_length !== b.text_length) return a.text_length - b.text_length;
+            return a.line_count - b.line_count;
+          });
+
+          const top = candidates.slice(0, 10).map(c => ({
+            tag: c.tag,
+            text_length: c.text_length,
+            line_count: c.line_count,
+            odd_count: c.odd_count,
+            one_plus_hits: c.one_plus_hits,
+            show_more_hits: c.show_more_hits,
+            team_hits: c.team_hits,
+            buts_hits: c.buts_hits,
+            passes_hits: c.passes_hits,
+            starts_with_points: c.starts_with_points,
+            own_starts_with_points: c.own_starts_with_points,
+            score: c.score,
+            preview: c.preview,
+          }));
+
+          if (!candidates.length) {
+            return {found: false, selected: null, top_candidates: top};
+          }
+
+          const best = candidates[0];
+          best.element.setAttribute(markerAttr, markerValue);
+          return {
+            found: true,
+            selected: {
+              tag: best.tag,
+              text_length: best.text_length,
+              line_count: best.line_count,
+              odd_count: best.odd_count,
+              one_plus_hits: best.one_plus_hits,
+              show_more_hits: best.show_more_hits,
+              team_hits: best.team_hits,
+              buts_hits: best.buts_hits,
+              passes_hits: best.passes_hits,
+              starts_with_points: best.starts_with_points,
+              own_starts_with_points: best.own_starts_with_points,
+              score: best.score,
+              preview: best.preview,
+            },
+            top_candidates: top,
+          };
+        }
+        """,
+        payload,
+    )
+    return result
+
+
+def get_marked_market_block(page: Page) -> Optional[Locator]:
+    loc = page.locator(f"[{MARKET_MARKER_ATTR}='{MARKET_MARKER_VALUE}']")
+    if safe_count(loc) == 0:
+        return None
+    return loc.first
+
+
+def click_all_expand_in_block(block: Locator, max_rounds: int = 10) -> int:
+    total_clicks = 0
+    for round_idx in range(1, max_rounds + 1):
+        clicked_this_round = 0
+        try:
+            buttons = block.locator("button, a, [role='button']")
+            for i in range(safe_count(buttons, 200)):
+                btn = buttons.nth(i)
+                txt = normalize_for_match(safe_inner_text(btn, timeout=800))
+                if "afficher plus" not in txt and "voir plus" not in txt:
+                    continue
+                try:
+                    btn.scroll_into_view_if_needed(timeout=1500)
+                except Exception:
+                    pass
+                try:
+                    btn.click(timeout=3000)
+                    clicked_this_round += 1
+                    total_clicks += 1
+                    log(f"clicked expand in points block #{total_clicks}")
+                    time.sleep(0.8)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        log(f"expand round {round_idx}: clicked={clicked_this_round}")
+        if clicked_this_round == 0:
+            break
+        time.sleep(0.8)
+    log(f"total expand clicks in points block: {total_clicks}")
+    return total_clicks
+
+
+def click_all_expand_on_page(page: Page, max_rounds: int = 6) -> int:
     total_clicks = 0
     for round_idx in range(1, max_rounds + 1):
         clicked = 0
@@ -236,12 +462,14 @@ def click_all_expand_on_page(page: Page, max_rounds: int = 8) -> int:
                     .toLowerCase()
                     .replace(/\s+/g, ' ')
                     .trim();
+
                   const isVisible = (el) => {
                     if (!el) return false;
                     const style = window.getComputedStyle(el);
                     const rect = el.getBoundingClientRect();
                     return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
                   };
+
                   const all = Array.from(document.querySelectorAll('button, a, [role="button"], div, span'));
                   let clicked = 0;
                   for (const el of all) {
@@ -249,12 +477,15 @@ def click_all_expand_on_page(page: Page, max_rounds: int = 8) -> int:
                     const txt = normalize(el.innerText || el.textContent || '');
                     if (!txt) continue;
                     if (txt !== 'afficher plus' && txt !== 'voir plus') continue;
+
                     let target = el;
                     for (let hops = 0; hops < 4 && target; hops += 1) {
                       if (typeof target.click === 'function') break;
                       target = target.parentElement;
                     }
-                    try { target.scrollIntoView({block: 'center'}); } catch (e) {}
+                    try {
+                      target.scrollIntoView({block: 'center'});
+                    } catch (e) {}
                     try {
                       target.click();
                       clicked += 1;
@@ -279,11 +510,9 @@ def extract_points_market_from_page_text(page_text: str) -> str:
     raw = str(page_text or '')
     if not raw.strip():
         return ''
-    start_patterns = [
-        r'Nombre de Points - Joueur - Match',
-        r'Nombre de Points - Joueur',
-        r'NOMBRE DE POINTS - JOUEUR - MATCH',
-        r'NOMBRE DE POINTS - JOUEUR',
+    patterns = [
+        r'Nombre de Points - Joueur(?: - Match)?',
+        r'NOMBRE DE POINTS - JOUEUR(?: - MATCH)?',
         r'NOMBRE DE POINTS DU JOUEUR(?: \(PROLONGATIONS INCLUSES\))?',
     ]
     stop_patterns = [
@@ -304,8 +533,7 @@ def extract_points_market_from_page_text(page_text: str) -> str:
         r'\n\s*Le match ira-t-il en prolongation',
     ]
     best = ''
-    best_label = ''
-    for pat in start_patterns:
+    for pat in patterns:
         for m in re.finditer(pat, raw, flags=re.I):
             start = m.start()
             end = len(raw)
@@ -322,8 +550,25 @@ def extract_points_market_from_page_text(page_text: str) -> str:
             segment = raw[start:end].strip()
             if len(segment) > len(best):
                 best = segment
-                best_label = m.group(0)
     return best
+
+
+def remaining_expand_in_block(block: Locator) -> int:
+    txt = normalize_for_match(safe_inner_text(block, timeout=1200))
+    if not txt:
+        return -1
+    return txt.count("afficher plus") + txt.count("voir plus")
+
+
+def contains_foreign_market_noise(block_text: str) -> List[str]:
+    txt = normalize_for_match(block_text)
+    banned = [
+        "nombre de buts - joueur",
+        "nombre de passes decisives - joueur",
+        "buteur (prolongations incluses)",
+        "buteur double chance",
+    ]
+    return [label for label in banned if label in txt]
 
 
 def isolate_lines(block_text: str) -> List[str]:
@@ -331,12 +576,16 @@ def isolate_lines(block_text: str) -> List[str]:
     return [x for x in raw_lines if x]
 
 
+def is_decimal_odd(token: str) -> bool:
+    return bool(re.fullmatch(r"\d+(?:[.,]\d+)?", norm_spaces(token)))
+
+
 def is_valid_player_name(player_name: str, teams: List[str]) -> bool:
     name = norm_spaces(player_name)
     if not name:
         return False
     key = normalize_for_match(name)
-    if key in {"1+", "2+", "3+", "4+", "afficher plus", "voir plus", "cashout", "joueurs", "points", "buts", "combos", "score exact", "prolongation", "paris populaires", "match"}:
+    if key in {"1+", "2+", "3+", "4+", "afficher plus", "voir plus", "cashout", "joueurs", "points", "buts", "combos", "score exact", "prolongation", "paris populaires"}:
         return False
     if len(name.split()) < 2:
         return False
@@ -347,6 +596,29 @@ def is_valid_player_name(player_name: str, teams: List[str]) -> bool:
     if name_team_key in team_keys:
         return False
     return True
+
+
+def assign_team_from_context(current_team: Optional[str]) -> str:
+    return current_team or ""
+
+
+def has_polluted_player_prefix(player_name: Any) -> bool:
+    value = normalize_for_match(player_name)
+    return bool(value) and (
+        value.startswith("match ")
+        or value.startswith("info ")
+        or value.startswith("informations ")
+    )
+
+
+def has_missing_or_polluted_rows(rows: List[Dict[str, str]]) -> Tuple[bool, str]:
+    if not rows:
+        return True, "no_rows"
+    if any(not safe_text(row.get("team")) for row in rows):
+        return True, "missing_team"
+    if any(has_polluted_player_prefix(row.get("player_name_raw")) for row in rows):
+        return True, "polluted_player_name"
+    return False, "ok"
 
 
 def dedupe_rows(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
@@ -365,10 +637,79 @@ def dedupe_rows(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
     return deduped_rows
 
 
-def parse_points_rows_from_regex(block_text: str, teams: List[str]) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]], str]:
+def parse_points_rows_from_lines(lines: List[str], teams: List[str]) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]], str]:
+    rows: List[Dict[str, str]] = []
+    debug_players: List[Dict[str, Any]] = []
+    i = 0
+    current_team: Optional[str] = None
+    header_tokens = {"1+", "2+", "3+", "4+", "1 ou plus", "2 ou plus", "3 ou plus", "4 ou plus"}
+    team_match_keys = {normalize_team_label(t): t for t in teams if t}
+
+    while i < len(lines):
+        line = lines[i]
+        line_key = normalize_team_label(line)
+        if line_key in team_match_keys:
+            current_team = team_match_keys[line_key]
+            i += 1
+            while i < len(lines) and normalize_for_match(lines[i]) in header_tokens:
+                i += 1
+            continue
+
+        player_name = line
+        if not is_valid_player_name(player_name, teams):
+            i += 1
+            continue
+
+        j = i + 1
+        odds: List[str] = []
+        while j < len(lines) and len(odds) < 4:
+            token = norm_spaces(lines[j])
+            token_key = normalize_for_match(token)
+            if normalize_team_label(token) in team_match_keys:
+                break
+            if token_key in header_tokens:
+                j += 1
+                continue
+            if "afficher plus" in token_key or "voir plus" in token_key:
+                break
+            if is_decimal_odd(token) or token == "-":
+                odds.append(token)
+                j += 1
+            else:
+                break
+
+        if odds:
+            first_odd = odds[0]
+            team = assign_team_from_context(current_team)
+            debug_players.append({
+                "team": team,
+                "player_name_raw": player_name,
+                "odds_count_seen": len(odds),
+                "kept_outcome_label": "1 ou plus",
+                "kept_odds_values": [first_odd] if first_odd != "-" else [],
+                "parser_mode": "line_based",
+            })
+            if first_odd != "-":
+                rows.append({
+                    "team": team,
+                    "player_name_raw": player_name,
+                    "outcome_label": "1 ou plus",
+                    "odds_raw": first_odd,
+                })
+            i = j
+            continue
+        i += 1
+
+    mode = "line_based_with_team" if any(r.get("team") for r in rows) else "line_based_no_team"
+    return dedupe_rows(rows), debug_players, mode
+
+
+def parse_points_rows_from_regex(block_text: str) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]], str]:
     text = norm_spaces(block_text)
-    text = re.sub(r'^.*?nombre de points(?: du joueur| - joueur(?: - match)?)\s*', '', text, flags=re.I)
-    text = re.sub(r'\b(?:Cashout|Afficher plus|Voir plus)\b', ' ', text, flags=re.I)
+    parts = re.split(r"nombre de points(?: du joueur| - joueur(?: - match)?)", text, flags=re.I)
+    if parts:
+        text = norm_spaces(parts[-1])
+    text = re.sub(r"^.*?\|\s*", "", text)
     pattern = re.compile(rf"({NAME_RE})\s+1\+\s*([\d.,]+)", re.I)
 
     rows: List[Dict[str, str]] = []
@@ -376,39 +717,62 @@ def parse_points_rows_from_regex(block_text: str, teams: List[str]) -> Tuple[Lis
     for m in pattern.finditer(text):
         player_name = norm_spaces(m.group(1))
         odd = norm_spaces(m.group(2))
-        if not is_valid_player_name(player_name, teams):
+        if not is_valid_player_name(player_name, []):
             continue
-        row = {
+        rows.append({
             "team": "",
             "player_name_raw": player_name,
             "outcome_label": "1 ou plus",
             "odds_raw": odd,
-        }
-        rows.append(row)
+        })
         debug_players.append({
             "team": "",
             "player_name_raw": player_name,
             "odds_count_seen": 1,
             "kept_outcome_label": "1 ou plus",
             "kept_odds_values": [odd],
-            "parser_mode": "regex_body_text",
+            "parser_mode": "regex_flattened",
         })
-    return dedupe_rows(rows), debug_players, "regex_body_text"
+    return dedupe_rows(rows), debug_players, "regex_flattened_no_team"
 
 
-def validate_rows(rows: List[Dict[str, str]], block_text: str) -> Tuple[bool, str]:
+def parse_points_rows(lines: List[str], block_text: str, teams: List[str]) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]], str]:
+    # Safe mode: only trust line-based extraction that can preserve team context.
+    # Regex/body-text flattening is too noisy and must stay debug-only.
+    rows_line, debug_line, mode_line = parse_points_rows_from_lines(lines, teams)
+    return rows_line, debug_line, mode_line
+
+
+def validate_rows(
+    rows: List[Dict[str, str]],
+    block_text: str,
+    *,
+    body_fallback_used: bool = False,
+    team_mode: Optional[str] = None,
+) -> Tuple[bool, str]:
     if not rows:
         return False, "no_rows"
     txt = normalize_for_match(block_text)
     if "nombre de points" not in txt or "joueur" not in txt:
         return False, "wrong_block_missing_points_heading"
+    foreign_noise = contains_foreign_market_noise(block_text)
+    if foreign_noise and len(rows) < 3:
+        return False, "wrong_block_foreign_market_noise"
+    if body_fallback_used:
+        return False, "body_text_fallback_forbidden"
+    if team_mode and team_mode != "line_based_with_team":
+        return False, f"unsafe_team_assignment_mode:{team_mode}"
     for row in rows:
         if not row.get("player_name_raw"):
             return False, "missing_player"
+        if has_polluted_player_prefix(row.get("player_name_raw")):
+            return False, "polluted_player_name"
         if row.get("outcome_label") != "1 ou plus":
             return False, "invalid_outcome_label"
         if not row.get("odds_raw"):
             return False, "missing_odds_raw"
+        if not safe_text(row.get("team")):
+            return False, "missing_team"
     return True, "ok"
 
 
@@ -447,7 +811,7 @@ def main() -> None:
         "players_seen": 0,
         "players_kept_points_1_plus": 0,
         "team_assignment_mode": None,
-        "used_body_text_fallback": True,
+        "used_body_text_fallback": False,
         "run_dir": str(run_dir),
         "fatal_error": None,
     }
@@ -493,35 +857,85 @@ def main() -> None:
             small_scroll(page, rounds=2, pixels=1200, wait_ms=800)
             page.screenshot(path=str(run_dir / "after_tab_click.png"), full_page=True)
 
-            summary["see_more_clicks"] = click_all_expand_on_page(page)
-            page.wait_for_timeout(1500)
+            block_selection_debug = select_exact_points_market_block(page, teams)
+            write_json(run_dir / "market_block_selection_debug.json", block_selection_debug)
+            summary["market_block_selection"] = block_selection_debug.get("selected")
+            summary["market_block_found"] = bool(block_selection_debug.get("found"))
+
+            block = get_marked_market_block(page)
+            if block is None:
+                raise RuntimeError("market_block_not_found: impossible de cibler le bloc exact 'Nombre de Points - Joueur'")
+
+            try:
+                block.scroll_into_view_if_needed(timeout=2500)
+            except Exception:
+                pass
+            time.sleep(1.0)
+
+            summary["see_more_clicks"] = click_all_expand_in_block(block)
+            time.sleep(1.2)
+
+            block_selection_debug = select_exact_points_market_block(page, teams)
+            write_json(run_dir / "market_block_selection_debug.json", block_selection_debug)
+            summary["market_block_selection"] = block_selection_debug.get("selected")
+            summary["market_block_found"] = bool(block_selection_debug.get("found"))
+
+            block = get_marked_market_block(page)
+            if block is None:
+                raise RuntimeError("market_block_not_found_after_expand: le bloc points n'a plus pu être retrouvé après expansion")
+
+            try:
+                block.scroll_into_view_if_needed(timeout=2500)
+            except Exception:
+                pass
             page.screenshot(path=str(run_dir / "after_expand.png"), full_page=True)
 
-            body_text = safe_inner_text(page.locator("body"), timeout=8000)
-            write_text(run_dir / "body_text.txt", body_text)
-            block_text = extract_points_market_from_page_text(body_text)
-            summary["market_block_found"] = bool(block_text)
-            summary["is_complete_market"] = "afficher plus" not in normalize_for_match(block_text) and "voir plus" not in normalize_for_match(block_text)
-            summary["remaining_see_more_in_market"] = 0 if summary["is_complete_market"] else 1
+            block_text = safe_inner_text(block, timeout=2500)
+            summary["remaining_see_more_in_market"] = remaining_expand_in_block(block)
+            summary["market_block_foreign_noise"] = contains_foreign_market_noise(block_text)
+            summary["is_complete_market"] = summary["remaining_see_more_in_market"] == 0
 
-            block_selection_debug = {
-                "mode": "body_text_only",
-                "found": bool(block_text),
-                "segment_length": len(block_text),
-                "preview": block_text[:1000],
-            }
-            summary["market_block_selection"] = block_selection_debug
-            write_json(run_dir / "market_block_selection_debug.json", block_selection_debug)
+            try:
+                outer_html = block.evaluate("el => el.outerHTML")
+            except Exception:
+                outer_html = ""
+
             write_text(run_dir / "points_market_only.txt", block_text)
-            write_text(run_dir / "points_market_only_fallback_from_body.txt", block_text)
-
-            if not block_text:
-                raise RuntimeError("market_block_not_found_in_body_text")
+            write_text(run_dir / "points_market_block.html", outer_html)
 
             isolated = isolate_lines(block_text)
-            rows, debug_players, team_mode = parse_points_rows_from_regex(block_text, teams)
+            rows, debug_players, team_mode = parse_points_rows(isolated, block_text, teams)
 
-            rows_valid, rows_validation_reason = validate_rows(rows, block_text)
+            parser_debug_rows: List[Dict[str, str]] = []
+            parser_debug_players: List[Dict[str, Any]] = []
+            parser_debug_team_mode: Optional[str] = None
+            if not rows:
+                click_all_expand_on_page(page)
+                page.wait_for_timeout(1200)
+                body_text = safe_inner_text(page.locator("body"), timeout=5000)
+                fallback_block_text = extract_points_market_from_page_text(body_text)
+                if fallback_block_text:
+                    write_text(run_dir / "points_market_only_fallback_from_body.txt", fallback_block_text)
+                    summary["used_body_text_fallback"] = True
+                    parser_debug_rows, parser_debug_players, parser_debug_team_mode = parse_points_rows(
+                        isolate_lines(fallback_block_text),
+                        fallback_block_text,
+                        teams,
+                    )
+                    write_json(run_dir / "points_market_rows_from_body_debug.json", parser_debug_rows)
+                    write_json(run_dir / "points_market_players_from_body_debug.json", parser_debug_players)
+                    summary["see_more_clicks"] = max(int(summary.get("see_more_clicks") or 0), 0)
+
+            rows_valid, rows_validation_reason = validate_rows(
+                rows,
+                block_text,
+                body_fallback_used=bool(summary.get("used_body_text_fallback")),
+                team_mode=team_mode,
+            )
+            invalid_rows, invalid_rows_reason = has_missing_or_polluted_rows(rows)
+            if invalid_rows and rows_valid:
+                rows_valid = False
+                rows_validation_reason = invalid_rows_reason
             summary["rows_valid"] = rows_valid
             summary["rows_validation_reason"] = rows_validation_reason
             summary["isolated_lines"] = len(isolated)
