@@ -81,6 +81,15 @@ def parse_decimal_odd(value: Any) -> float:
     return float(raw)
 
 
+def has_polluted_player_prefix(player_name: Any) -> bool:
+    value = normalize_key(player_name)
+    return bool(value) and (
+        value.startswith("match ")
+        or value.startswith("info ")
+        or value.startswith("informations ")
+    )
+
+
 def resolve_batch_summary_path() -> Path:
     raw = os.getenv("BATCH_SUMMARY_PATH", "").strip()
     if not raw:
@@ -113,6 +122,11 @@ def evaluate_event(event: Dict[str, Any], min_rows: int) -> Tuple[bool, List[str
 
     if not bool(summary.get("market_block_found")):
         reasons.append("market_block_not_found")
+    if bool(summary.get("used_body_text_fallback")):
+        reasons.append("body_text_fallback_used")
+    team_mode = safe_text(summary.get("team_assignment_mode"))
+    if team_mode and team_mode != "line_based_with_team":
+        reasons.append(f"unsafe_team_assignment_mode:{team_mode}")
     if not bool(summary.get("rows_valid")):
         reasons.append(f"rows_invalid:{safe_text(summary.get('rows_validation_reason')) or 'unknown'}")
 
@@ -146,6 +160,12 @@ def evaluate_event(event: Dict[str, Any], min_rows: int) -> Tuple[bool, List[str
         )
         if not key[1] or not key[2]:
             reasons.append("missing_row_key_fields")
+            break
+        if not key[0]:
+            reasons.append("missing_team")
+            break
+        if has_polluted_player_prefix(row.get("player_name_raw")):
+            reasons.append("polluted_player_name")
             break
         if key in seen:
             reasons.append("duplicate_player_rows")
