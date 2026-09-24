@@ -298,8 +298,10 @@ def main() -> None:
         "accepted_rows_count": report["totals"]["accepted_rows_count"],
     }, ensure_ascii=False, indent=2))
 
+    # Une absence complète du marché POINTS est normale hors période de cotation.
+    # Le rapport reste informatif et laisse le pipeline continuer avec 0 lignes.
     if report["totals"]["accepted_event_count"] == 0:
-        raise SystemExit("Aucun match accepté. Voir acceptance_report.json")
+        print("Aucun match accepté: marché POINTS indisponible ou non exploitable. Pipeline continue avec 0 cote.")
 
 
 if __name__ == "__main__":
