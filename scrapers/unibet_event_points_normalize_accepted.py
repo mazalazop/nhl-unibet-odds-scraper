@@ -175,7 +175,7 @@ def main() -> None:
     }, ensure_ascii=False, indent=2))
 
     if payload["rows_count"] == 0:
-        raise SystemExit("normalized_points_odds.json vide")
+        print("Aucune cote POINT acceptée : payload vide mais valide.")
 
 
 if __name__ == "__main__":
