@@ -18,6 +18,9 @@ TAB_LABEL_CANDIDATES = [
 BLOCK_LABEL_CANDIDATES = [
     "BUTEUR (PROLONGATIONS INCLUSES)",
     "BUTEUR",
+    "Nombre de Buts - Joueur - Match (Hors TAB)",
+    "Nombre de Buts - Joueur - Match",
+    "Nombre de Buts - Joueur",
 ]
 
 
@@ -290,95 +293,68 @@ def score_market_block(text, label):
 
 
 def select_first_matching_market_block(page, labels, teams=None):
-    """Select the actual visible player-goal market block, not the navigation/tab wrapper."""
-    target_labels = [str(x).strip() for x in (labels or []) if str(x).strip()]
-    team_names = [str(x).strip() for x in (teams or []) if str(x).strip()]
-    result = page.evaluate(
-        """
-        (cfg) => {
-          const normalize = (value) => String(value || '')
-            .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-            .toLowerCase().replace(/\s+/g, ' ').trim();
-          const countMatches = (text, re) => (text.match(re) || []).length;
-          const teams = (cfg.teams || []).map(normalize).filter(Boolean);
-          const marker = 'data-henachel-goal-market';
-          for (const el of Array.from(document.querySelectorAll('[' + marker + ']'))) el.removeAttribute(marker);
-          const candidates = [];
-          for (const el of Array.from(document.querySelectorAll('div,section,article,li'))) {
-            const raw = el.innerText || '';
-            const text = normalize(raw);
-            if (!text || !text.includes('buteur')) continue;
-            const lineCount = raw.split(/\n+/).map(x => x.trim()).filter(Boolean).length;
-            const textLength = text.length;
-            const oddCount = countMatches(text, /\b\d+(?:[.,]\d+)?\b/g);
-            const goalHeader = text.includes('nombre de buts - joueur') || text.includes('nombre de buts du joueur');
-            const playerHeader = text.includes('buteur (prolongations incluses)') || text.startsWith('buteur');
-            const twoPlus = countMatches(text, /(?:^|\s)2\s*buts?\s*ou\s*plus(?:\s|$)/g);
-            const teamHits = teams.filter(t => t && text.includes(t)).length;
-            const pointsNoise = countMatches(text, /nombre de points - joueur/g);
-            const passesNoise = countMatches(text, /nombre de passes decisives - joueur/g);
-            const tabOnly = lineCount <= 20 && oddCount < 4 && teamHits >= 1;
-            let score = 0;
-            if (goalHeader) score += 180;
-            if (playerHeader) score += 100;
-            if (twoPlus >= 1) score += 70;
-            if (teamHits >= 1) score += 30;
-            if (oddCount >= 8) score += 35;
-            if (lineCount >= 8 && lineCount <= 180) score += 20;
-            if (textLength >= 120 && textLength <= 5000) score += 20;
-            score -= pointsNoise * 150;
-            score -= passesNoise * 150;
-            if (tabOnly) score -= 180;
-            if (textLength > 9000) score -= 180;
-            candidates.push({el,tag:el.tagName,textLength,lineCount,oddCount,goalHeader,playerHeader,twoPlus,teamHits,pointsNoise,passesNoise,tabOnly,score,preview:raw.slice(0,700)});
-          }
-          candidates.sort((a,b) => b.score-a.score || a.textLength-b.textLength || a.lineCount-b.lineCount);
-          const top = candidates.slice(0,10).map(c => ({tag:c.tag,text_length:c.textLength,line_count:c.lineCount,odd_count:c.oddCount,goal_header:c.goalHeader,player_header:c.playerHeader,two_plus:c.twoPlus,team_hits:c.teamHits,points_noise:c.pointsNoise,passes_noise:c.passesNoise,tab_only:c.tabOnly,score:c.score,preview:c.preview}));
-          if (!candidates.length) return {found:false,selected:null,top_candidates:top};
-          const best=candidates[0]; best.el.setAttribute(marker,'1');
-          return {found:true,selected:{tag:best.tag,text_length:best.textLength,line_count:best.lineCount,odd_count:best.oddCount,goal_header:best.goalHeader,player_header:best.playerHeader,two_plus:best.twoPlus,team_hits:best.teamHits,points_noise:best.pointsNoise,passes_noise:best.passesNoise,tab_only:best.tabOnly,score:best.score,preview:best.preview},top_candidates:top};
-        }
-        """,
-        {"teams":team_names}
-    )
-    if result.get("found"):
-        log(f"goal market block selected: {result.get('selected')}")
-        return target_labels[0] if target_labels else "BUTEUR", page.locator("[data-henachel-goal-market='1']").first
+    """Select the rendered player-goal odds block after the Buteurs tab is activated."""
+    wanted = [
+        "Nombre de Buts - Joueur - Match (Hors TAB)",
+        "Nombre de Buts - Joueur - Match",
+        "Nombre de Buts - Joueur",
+        "BUTEUR (PROLONGATIONS INCLUSES)",
+        "BUTEUR",
+    ]
+    for label in wanted:
+        loc = page.get_by_text(label, exact=True)
+        try:
+            count = safe_count(loc, 50)
+        except Exception:
+            count = 0
+        for i in range(count):
+            try:
+                heading = loc.nth(i)
+                try:
+                    heading.scroll_into_view_if_needed(timeout=1500)
+                except Exception:
+                    pass
+                for level in range(1, 8):
+                    block = heading.locator("xpath=" + "/.." * level).first
+                    text = safe_inner_text(block)
+                    norm = normalize_for_match(text)
+                    if "1+" in text and ("nombre de buts" in norm or "buteur" in norm) and len(text.splitlines()) >= 8:
+                        log(f"goal market block selected: {label} level={level}")
+                        return "BUTEUR", block
+            except Exception:
+                continue
     return None, None
 
-def click_all_see_more_in_block(block, max_rounds=8):
-    total_clicks = 0
 
+def click_all_see_more_in_block(block, max_rounds=10):
+    total_clicks = 0
     for round_idx in range(1, max_rounds + 1):
         clicked_this_round = 0
-
         try:
-            buttons = block.locator("button")
-            count = safe_count(buttons, 100)
-
+            buttons = block.locator("button, a, [role='button']")
+            count = safe_count(buttons, 200)
             for i in range(count):
                 btn = buttons.nth(i)
-                txt = norm_spaces(safe_inner_text(btn)).lower()
-                if "voir plus" not in txt:
+                txt = normalize_for_match(safe_inner_text(btn))
+                if "voir plus" not in txt and "afficher plus" not in txt:
                     continue
-
                 try:
-                    btn.click(timeout=3000)
+                    btn.scroll_into_view_if_needed(timeout=1500)
+                except Exception:
+                    pass
+                try:
+                    btn.click(timeout=3000, force=True)
                     clicked_this_round += 1
                     total_clicks += 1
-                    log(f"clicked see more in goals block #{total_clicks}")
-                    time.sleep(0.8)
+                    log(f"clicked expand in goals block #{total_clicks}")
                 except Exception:
                     continue
         except Exception:
             pass
-
-        log(f"see more round {round_idx}: clicked={clicked_this_round}")
+        log(f"expand round {round_idx}: clicked={clicked_this_round}")
         if clicked_this_round == 0:
             break
-        time.sleep(1.0)
-
-    log(f"total see more clicks in goals block: {total_clicks}")
+        time.sleep(0.8)
     return total_clicks
 
 
@@ -435,91 +411,51 @@ def is_valid_player_name(player_name, teams):
 def parse_goals_rows(lines, teams):
     rows = []
     debug_players = []
-
-    i = 0
-    current_team = None
-
-    header_tokens = {
-        "buteur",
-        "2 buts ou plus",
+    reserved = {
+        "1+", "2+", "3+", "4+", "etape", "afficher plus", "voir plus",
+        "buteur", "buts", "paris", "stats", "stats joueurs", "handicap",
     }
-
-    team_match_keys = set([normalize_for_match(t) for t in teams if t])
-
+    i = 0
     while i < len(lines):
-        line = lines[i]
-        line_key = normalize_for_match(line)
-
-        if line_key in team_match_keys:
-            current_team = line
-            i += 1
-            while i < len(lines) and normalize_for_match(lines[i]) in header_tokens:
-                i += 1
-            continue
-
-        if not current_team:
+        player = norm_spaces(lines[i])
+        key = normalize_for_match(player)
+        if key in reserved or not is_valid_player_name(player, teams):
             i += 1
             continue
 
-        player_name = line
-
-        if not is_valid_player_name(player_name, teams):
-            i += 1
-            continue
-
+        # The Unibet goal market renders each player as:
+        # Player -> 1+ -> decimal odds -> Étape -> probability -> 2+ -> ...
         j = i + 1
-        odds = []
-
-        while j < len(lines) and len(odds) < 2:
-            token = lines[j]
+        found_1p = False
+        odd = None
+        while j < min(i + 12, len(lines)):
+            token = norm_spaces(lines[j])
             token_key = normalize_for_match(token)
-
-            if token_key in team_match_keys:
+            if token_key in {"1+", "1 ou plus"}:
+                found_1p = True
+                if j + 1 < len(lines) and is_decimal_odd(lines[j + 1]):
+                    odd = lines[j + 1]
                 break
-
-            if token_key in header_tokens or "voir plus" in token_key or "voir moins" in token_key:
+            if "afficher plus" in token_key or "voir plus" in token_key:
                 break
+            j += 1
 
-            if is_decimal_odd(token) or token == "-":
-                odds.append(token)
-                j += 1
-            else:
-                break
-
-        if odds:
-            player_rows = []
-            has_dash = False
-            odds_values = []
-
-            first_odd = odds[0]
-
-            if first_odd == "-":
-                has_dash = True
-            else:
-                odds_values.append(first_odd)
-                player_rows.append({
-                    "team": current_team,
-                    "player_name_raw": player_name,
-                    "outcome_label": "Buteur",
-                    "odds_raw": first_odd,
-                })
-
-            for extra_odd in odds[1:]:
-                if extra_odd == "-":
-                    has_dash = True
-
-            if player_rows:
-                rows.extend(player_rows)
-                debug_players.append({
-                    "team": current_team,
-                    "player_name_raw": player_name,
-                    "odds_count_seen": len(odds),
-                    "kept_outcome_label": "Buteur",
-                    "has_dash": has_dash,
-                    "kept_odds_values": odds_values,
-                })
-
-            i = j
+        if found_1p and odd:
+            rows.append({
+                "team": "",
+                "player_name_raw": player,
+                "outcome_label": "Buteur",
+                "odds_raw": odd,
+            })
+            debug_players.append({
+                "team": "",
+                "player_name_raw": player,
+                "odds_count_seen": 1,
+                "kept_outcome_label": "Buteur",
+                "kept_odds_values": [odd],
+                "parser_mode": "goal_1plus_text_block",
+            })
+            i = j + 2
         else:
             i += 1
 
@@ -529,17 +465,13 @@ def parse_goals_rows(lines, teams):
 def validate_rows(rows):
     if not rows:
         return False, "no_rows"
-
     for row in rows:
-        if not row.get("team"):
-            return False, "missing_team"
         if not row.get("player_name_raw"):
             return False, "missing_player"
         if row.get("outcome_label") != "Buteur":
             return False, "invalid_outcome_label"
         if not row.get("odds_raw"):
             return False, "missing_odds_raw"
-
     return True, "ok"
 
 
