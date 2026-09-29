@@ -218,26 +218,54 @@ def click_label(page, label):
             count = safe_count(loc)
             for i in range(count):
                 target = loc.nth(i)
-                if not target.is_visible(timeout=1200):
-                    continue
                 try:
                     target.scroll_into_view_if_needed(timeout=1500)
                 except Exception:
                     pass
                 try:
-                    target.click(timeout=5000)
+                    target.click(timeout=5000, force=True)
                     log(f"clicked label: {label} index={i}")
                     return True
                 except Exception:
                     try:
-                        target.evaluate("el => el.click()")
+                        target.evaluate("(el) => { el.click(); el.dispatchEvent(new MouseEvent('click', {bubbles:true,cancelable:true,view:window})); }")
                         log(f"clicked label via JS: {label} index={i}")
                         return True
                     except Exception:
                         continue
         except Exception:
             continue
+
+    # Last-resort DOM click: Unibet sometimes renders the market selector as a
+    # non-button element whose accessible role is absent until after hydration.
+    try:
+        clicked = page.evaluate(
+            """(wanted) => {
+              const norm = (v) => String(v || '').normalize('NFD')
+                .replace(/[\\u0300-\\u036f]/g, '').toLowerCase()
+                .replace(/\\s+/g, ' ').trim();
+              const target = norm(wanted);
+              const nodes = Array.from(document.querySelectorAll('a,div,span,li'));
+              for (const el of nodes) {
+                const text = norm(el.innerText || el.textContent || '');
+                if (text !== target) continue;
+                try { el.scrollIntoView({block:'center'}); } catch(e) {}
+                try { el.click(); } catch(e) {}
+                try { el.dispatchEvent(new MouseEvent('click', {bubbles:true,cancelable:true,view:window})); } catch(e) {}
+                return true;
+              }
+              return false;
+            }""",
+            label,
+        )
+        if clicked:
+            log(f"clicked label via DOM fallback: {label}")
+            return True
+    except Exception:
+        pass
+
     return False
+
 
 def click_first_matching_label(page, labels):
     for label in labels:
