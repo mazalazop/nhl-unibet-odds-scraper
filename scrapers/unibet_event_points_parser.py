@@ -923,7 +923,8 @@ def main() -> None:
                 pass
             time.sleep(1.0)
 
-            click_understanding_button(block)\n            summary["see_more_clicks"] = click_all_expand_in_block(block)
+            click_understanding_button(block)
+            summary["see_more_clicks"] = click_all_expand_in_block(block)
             time.sleep(1.2)
 
             block_selection_debug = select_exact_points_market_block(page, teams)
