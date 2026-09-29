@@ -610,6 +610,11 @@ def main():
             summary["clicked_tab_label"] = click_first_matching_label(page, TAB_LABEL_CANDIDATES)
             time.sleep(1.5)
             try:
+                write_text(run_dir / "body_after_buteurs_click.txt", safe_inner_text(page.locator("body")))
+                write_text(run_dir / "buteur_text_nodes.txt", page.evaluate("""() => Array.from(document.querySelectorAll("a,button,[role=tab],div,section,article,li")).filter(el => /buteur|nombre de buts|2 buts ou plus/i.test(el.innerText || "")).slice(0,200).map(el => el.outerHTML.slice(0,4000)).join("\n---NODE---\n")"""))
+            except Exception:
+                pass
+            try:
                 page.mouse.wheel(0, 1200)
             except Exception:
                 pass
