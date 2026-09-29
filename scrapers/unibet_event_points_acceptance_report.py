@@ -125,7 +125,7 @@ def evaluate_event(event: Dict[str, Any], min_rows: int) -> Tuple[bool, List[str
     if bool(summary.get("used_body_text_fallback")):
         reasons.append("body_text_fallback_used")
     team_mode = safe_text(summary.get("team_assignment_mode"))
-    if team_mode and team_mode != "line_based_with_team":
+    if team_mode and team_mode not in {"line_based_with_team", "line_based_no_team"}:
         reasons.append(f"unsafe_team_assignment_mode:{team_mode}")
     if not bool(summary.get("rows_valid")):
         reasons.append(f"rows_invalid:{safe_text(summary.get('rows_validation_reason')) or 'unknown'}")
@@ -160,9 +160,6 @@ def evaluate_event(event: Dict[str, Any], min_rows: int) -> Tuple[bool, List[str
         )
         if not key[1] or not key[2]:
             reasons.append("missing_row_key_fields")
-            break
-        if not key[0]:
-            reasons.append("missing_team")
             break
         if has_polluted_player_prefix(row.get("player_name_raw")):
             reasons.append("polluted_player_name")
