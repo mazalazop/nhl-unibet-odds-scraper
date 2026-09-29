@@ -207,23 +207,37 @@ def click_cookie_if_present(page):
 
 def click_label(page, label):
     candidates = [
-        page.locator(f"text={label}"),
-        page.get_by_text(label, exact=False),
+        page.get_by_role("tab", name=label, exact=False),
+        page.get_by_role("button", name=label, exact=False),
         page.locator(f"button:has-text('{label}')"),
         page.locator(f"[role='tab']:has-text('{label}')"),
+        page.get_by_text(label, exact=False),
     ]
     for loc in candidates:
         try:
-            if safe_count(loc) > 0:
-                target = loc.first
-                if target.is_visible(timeout=2500):
+            count = safe_count(loc)
+            for i in range(count):
+                target = loc.nth(i)
+                if not target.is_visible(timeout=1200):
+                    continue
+                try:
+                    target.scroll_into_view_if_needed(timeout=1500)
+                except Exception:
+                    pass
+                try:
                     target.click(timeout=5000)
-                    log(f"clicked label: {label}")
+                    log(f"clicked label: {label} index={i}")
                     return True
+                except Exception:
+                    try:
+                        target.evaluate("el => el.click()")
+                        log(f"clicked label via JS: {label} index={i}")
+                        return True
+                    except Exception:
+                        continue
         except Exception:
             continue
     return False
-
 
 def click_first_matching_label(page, labels):
     for label in labels:
@@ -247,68 +261,62 @@ def score_market_block(text, label):
     return score
 
 
-def select_first_matching_market_block(page, labels):
-    for label in labels:
-        heading_candidates = [
-            page.get_by_text(label, exact=True),
-            page.locator(f"text={label}"),
-        ]
-
-        for heading_loc in heading_candidates:
-            try:
-                if safe_count(heading_loc) == 0:
-                    continue
-
-                heading = heading_loc.first
-                if not heading.is_visible(timeout=2000):
-                    continue
-
-                container_selectors = [
-                    "xpath=ancestor::section[1]",
-                    "xpath=ancestor::div[contains(@class, 'market')][1]",
-                    "xpath=ancestor::div[contains(@class, 'Market')][1]",
-                    "xpath=ancestor::div[1]",
-                ]
-
-                for selector in container_selectors:
-                    try:
-                        container = heading.locator(selector)
-                        if safe_count(container) == 0:
-                            continue
-
-                        block = container.first
-                        block_text = safe_inner_text(block)
-
-                        if not block_text:
-                            continue
-
-                        block_text_norm = normalize_for_match(block_text)
-
-                        if "buteur" not in block_text_norm:
-                            continue
-
-                        # On évite les blocs qui ressemblent surtout à d'autres marchés
-                        if "nombre de points du joueur" in block_text_norm:
-                            continue
-
-                        if "buteur double chance" in block_text_norm:
-                            continue
-
-                        # Pour le marché goals, on veut voir la structure attendue
-                        if "2 buts ou plus" not in block_text_norm:
-                            continue
-
-                        log(f"market block selected by heading: {label}")
-                        return label, block
-
-                    except Exception:
-                        continue
-
-            except Exception:
-                continue
-
+def select_first_matching_market_block(page, labels, teams=None):
+    """Select the actual visible player-goal market block, not the navigation/tab wrapper."""
+    target_labels = [str(x).strip() for x in (labels or []) if str(x).strip()]
+    team_names = [str(x).strip() for x in (teams or []) if str(x).strip()]
+    result = page.evaluate(
+        """
+        (cfg) => {
+          const normalize = (value) => String(value || '')
+            .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase().replace(/\s+/g, ' ').trim();
+          const countMatches = (text, re) => (text.match(re) || []).length;
+          const teams = (cfg.teams || []).map(normalize).filter(Boolean);
+          const marker = 'data-henachel-goal-market';
+          for (const el of Array.from(document.querySelectorAll('[' + marker + ']'))) el.removeAttribute(marker);
+          const candidates = [];
+          for (const el of Array.from(document.querySelectorAll('div,section,article,li'))) {
+            const raw = el.innerText || '';
+            const text = normalize(raw);
+            if (!text || !text.includes('buteur')) continue;
+            const lineCount = raw.split(/\n+/).map(x => x.trim()).filter(Boolean).length;
+            const textLength = text.length;
+            const oddCount = countMatches(text, /\b\d+(?:[.,]\d+)?\b/g);
+            const goalHeader = text.includes('nombre de buts - joueur') || text.includes('nombre de buts du joueur');
+            const playerHeader = text.includes('buteur (prolongations incluses)') || text.startsWith('buteur');
+            const twoPlus = countMatches(text, /(?:^|\s)2\s*buts?\s*ou\s*plus(?:\s|$)/g);
+            const teamHits = teams.filter(t => t && text.includes(t)).length;
+            const pointsNoise = countMatches(text, /nombre de points - joueur/g);
+            const passesNoise = countMatches(text, /nombre de passes decisives - joueur/g);
+            const tabOnly = lineCount <= 20 && oddCount < 4 && teamHits >= 1;
+            let score = 0;
+            if (goalHeader) score += 180;
+            if (playerHeader) score += 100;
+            if (twoPlus >= 1) score += 70;
+            if (teamHits >= 1) score += 30;
+            if (oddCount >= 8) score += 35;
+            if (lineCount >= 8 && lineCount <= 180) score += 20;
+            if (textLength >= 120 && textLength <= 5000) score += 20;
+            score -= pointsNoise * 150;
+            score -= passesNoise * 150;
+            if (tabOnly) score -= 180;
+            if (textLength > 9000) score -= 180;
+            candidates.push({el,tag:el.tagName,textLength,lineCount,oddCount,goalHeader,playerHeader,twoPlus,teamHits,pointsNoise,passesNoise,tabOnly,score,preview:raw.slice(0,700)});
+          }
+          candidates.sort((a,b) => b.score-a.score || a.textLength-b.textLength || a.lineCount-b.lineCount);
+          const top = candidates.slice(0,10).map(c => ({tag:c.tag,text_length:c.textLength,line_count:c.lineCount,odd_count:c.oddCount,goal_header:c.goalHeader,player_header:c.playerHeader,two_plus:c.twoPlus,team_hits:c.teamHits,points_noise:c.pointsNoise,passes_noise:c.passesNoise,tab_only:c.tabOnly,score:c.score,preview:c.preview}));
+          if (!candidates.length) return {found:false,selected:null,top_candidates:top};
+          const best=candidates[0]; best.el.setAttribute(marker,'1');
+          return {found:true,selected:{tag:best.tag,text_length:best.textLength,line_count:best.lineCount,odd_count:best.oddCount,goal_header:best.goalHeader,player_header:best.playerHeader,two_plus:best.twoPlus,team_hits:best.teamHits,points_noise:best.pointsNoise,passes_noise:best.passesNoise,tab_only:best.tabOnly,score:best.score,preview:best.preview},top_candidates:top};
+        }
+        """,
+        {"teams":team_names}
+    )
+    if result.get("found"):
+        log(f"goal market block selected: {result.get('selected')}")
+        return target_labels[0] if target_labels else "BUTEUR", page.locator("[data-henachel-goal-market='1']").first
     return None, None
-
 
 def click_all_see_more_in_block(block, max_rounds=8):
     total_clicks = 0
@@ -571,7 +579,15 @@ def main():
             summary["teams_source"] = teams_source
             log(f"teams detected: {teams} source={teams_source}")
 
-            selected_block_label, block = select_first_matching_market_block(page, BLOCK_LABEL_CANDIDATES)
+            summary["clicked_tab_label"] = click_first_matching_label(page, TAB_LABEL_CANDIDATES)
+            time.sleep(1.5)
+            try:
+                page.mouse.wheel(0, 1200)
+            except Exception:
+                pass
+            time.sleep(0.8)
+
+            selected_block_label, block = select_first_matching_market_block(page, BLOCK_LABEL_CANDIDATES, teams)
 
             if block is None:
                 summary["clicked_tab_label"] = click_first_matching_label(page, TAB_LABEL_CANDIDATES)
