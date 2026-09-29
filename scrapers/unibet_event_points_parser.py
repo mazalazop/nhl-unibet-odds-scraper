@@ -822,8 +822,6 @@ def validate_rows(
             return False, "invalid_outcome_label"
         if not row.get("odds_raw"):
             return False, "missing_odds_raw"
-        if not safe_text(row.get("team")):
-            return False, "missing_team"
     return True, "ok"
 
 
