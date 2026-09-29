@@ -280,6 +280,8 @@ def run_parser_for_event(event_url: str, event_index: int, total_events: int, ou
     stderr_path = logs_dir / f"{event_index:03d}_{slug}.stderr.log"
     write_text(stdout_path, stdout)
     write_text(stderr_path, stderr)
+    if parser_exit_code != 0 and stderr.strip():
+        log(f"[{event_index}/{total_events}] parser stderr:\\n{stderr[-4000:]}")
 
     summary = artifacts["summary"] or {}
     rows = artifacts["rows"] or []
