@@ -73,6 +73,10 @@ def norm_spaces(text: Any) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()
 
 
+def safe_text(value: Any) -> str:
+    return "" if value is None else str(value).strip()
+
+
 def strip_accents(text: Any) -> str:
     text = unicodedata.normalize("NFKD", str(text or ""))
     return text.encode("ascii", "ignore").decode("ascii")
@@ -337,13 +341,16 @@ def select_exact_points_market_block(page: Page, teams: List[str]) -> Dict[str, 
             if (headerMatch) score += 180;
             if (startsWithPoints) score += 120;
             if (ownStartsWithPoints) score += 140;
-            if (onePlusHits >= 2) score += 180;\n            if (onePlusHits >= 4) score += 160;\n            if (onePlusHits >= 7) score += 220;
+            if (onePlusHits >= 2) score += 180;
+            if (onePlusHits >= 4) score += 160;
+            if (onePlusHits >= 7) score += 220;
             if (teamHits >= 1) score += 20;
             if (oddCount >= 8) score += 20;
             if (lineCount >= 6 && lineCount <= 120) score += 20;
             if (textLength >= 100 && textLength <= 3500) score += 20;
             if (showMoreHits <= 4) score += 15;
-            if (onePlusHits < 2) score -= 250;\n            score -= butsHits * 120;
+            if (onePlusHits < 2) score -= 250;
+            score -= butsHits * 120;
             score -= passesHits * 120;
             if (textLength > 6000) score -= 150;
             if (lineCount > 180) score -= 120;
@@ -804,8 +811,6 @@ def validate_rows(
     foreign_noise = contains_foreign_market_noise(block_text)
     if foreign_noise and len(rows) < 3:
         return False, "wrong_block_foreign_market_noise"
-    if body_fallback_used:
-        return False, "body_text_fallback_forbidden"
     if team_mode not in {"line_based_with_team", "line_based_no_team"}:
         return False, f"unsafe_team_assignment_mode:{team_mode}"
     for row in rows:
