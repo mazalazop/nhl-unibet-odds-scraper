@@ -239,7 +239,7 @@ def score_market_block(text, label):
     if label.lower() in txt:
         score += 10.0
 
-    score += txt.count("voir plus") * 2.0
+    score += (txt.count("voir plus") + txt.count("afficher plus")) * 2.0
     score += txt.count("buteur") * 0.8
     score += txt.count("2 buts ou plus") * 1.2
     score += len(re.findall(r"\b\d+(?:[.,]\d+)?\b", txt)) * 0.03
@@ -295,9 +295,7 @@ def select_first_matching_market_block(page, labels):
                             continue
 
                         # Pour le marché goals, on veut voir la structure attendue
-                        if "2 buts ou plus" not in block_text_norm:
-                            continue
-
+                        
                         log(f"market block selected by heading: {label}")
                         return label, block
 
@@ -323,7 +321,7 @@ def click_all_see_more_in_block(block, max_rounds=8):
             for i in range(count):
                 btn = buttons.nth(i)
                 txt = norm_spaces(safe_inner_text(btn)).lower()
-                if "voir plus" not in txt:
+                if "voir plus" not in txt and "afficher plus" not in txt:
                     continue
 
                 try:
@@ -349,7 +347,7 @@ def click_all_see_more_in_block(block, max_rounds=8):
 def remaining_see_more_in_block(block):
     try:
         txt = safe_inner_text(block).lower()
-        return txt.count("voir plus")
+        return txt.count("voir plus") + txt.count("afficher plus")
     except Exception:
         return -1
 
