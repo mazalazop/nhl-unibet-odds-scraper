@@ -263,6 +263,19 @@ def small_scroll(page: Page, rounds: int = 3, pixels: int = 1200, wait_ms: int =
         page.wait_for_timeout(wait_ms)
 
 
+def click_understanding_button(block: Locator) -> bool:
+    for label in ["J'ai compris", "J’ai compris"]:
+        try:
+            loc = block.get_by_role("button", name=label, exact=False)
+            if safe_count(loc) and loc.first.is_visible(timeout=1000):
+                loc.first.click(timeout=3000)
+                time.sleep(0.8)
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def select_exact_points_market_block(page: Page, teams: List[str]) -> Dict[str, Any]:
     payload = {
         "labels": POINTS_BLOCK_LABEL_CANDIDATES,
@@ -324,13 +337,13 @@ def select_exact_points_market_block(page: Page, teams: List[str]) -> Dict[str, 
             if (headerMatch) score += 180;
             if (startsWithPoints) score += 120;
             if (ownStartsWithPoints) score += 140;
-            if (onePlusHits >= 4) score += 60;
+            if (onePlusHits >= 2) score += 180;\n            if (onePlusHits >= 4) score += 160;\n            if (onePlusHits >= 7) score += 220;
             if (teamHits >= 1) score += 20;
             if (oddCount >= 8) score += 20;
             if (lineCount >= 6 && lineCount <= 120) score += 20;
             if (textLength >= 100 && textLength <= 3500) score += 20;
             if (showMoreHits <= 4) score += 15;
-            score -= butsHits * 120;
+            if (onePlusHits < 2) score -= 250;\n            score -= butsHits * 120;
             score -= passesHits * 120;
             if (textLength > 6000) score -= 150;
             if (lineCount > 180) score -= 120;
@@ -614,8 +627,6 @@ def has_polluted_player_prefix(player_name: Any) -> bool:
 def has_missing_or_polluted_rows(rows: List[Dict[str, str]]) -> Tuple[bool, str]:
     if not rows:
         return True, "no_rows"
-    if any(not safe_text(row.get("team")) for row in rows):
-        return True, "missing_team"
     if any(has_polluted_player_prefix(row.get("player_name_raw")) for row in rows):
         return True, "polluted_player_name"
     return False, "ok"
@@ -637,6 +648,21 @@ def dedupe_rows(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
     return deduped_rows
 
 
+def parse_player_odd_from_line(line: str) -> Optional[Tuple[str, str]]:
+    raw = norm_spaces(line)
+    if "1+" not in raw:
+        return None
+    pattern = re.compile(rf"({NAME_RE})\s*\|?\s*1\+\s*([\d.,]+)", re.I)
+    m = pattern.search(raw)
+    if not m:
+        return None
+    player_name = norm_spaces(m.group(1))
+    odd = norm_spaces(m.group(2))
+    if not is_valid_player_name(player_name, []):
+        return None
+    return player_name, odd
+
+
 def parse_points_rows_from_lines(lines: List[str], teams: List[str]) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]], str]:
     rows: List[Dict[str, str]] = []
     debug_players: List[Dict[str, Any]] = []
@@ -653,6 +679,26 @@ def parse_points_rows_from_lines(lines: List[str], teams: List[str]) -> Tuple[Li
             i += 1
             while i < len(lines) and normalize_for_match(lines[i]) in header_tokens:
                 i += 1
+            continue
+
+        direct = parse_player_odd_from_line(line)
+        if direct:
+            player_name, first_odd = direct
+            debug_players.append({
+                "team": "",
+                "player_name_raw": player_name,
+                "odds_count_seen": 1,
+                "kept_outcome_label": "1 ou plus",
+                "kept_odds_values": [first_odd],
+                "parser_mode": "inline_line",
+            })
+            rows.append({
+                "team": "",
+                "player_name_raw": player_name,
+                "outcome_label": "1 ou plus",
+                "odds_raw": first_odd,
+            })
+            i += 1
             continue
 
         player_name = line
@@ -760,7 +806,7 @@ def validate_rows(
         return False, "wrong_block_foreign_market_noise"
     if body_fallback_used:
         return False, "body_text_fallback_forbidden"
-    if team_mode and team_mode != "line_based_with_team":
+    if team_mode not in {"line_based_with_team", "line_based_no_team"}:
         return False, f"unsafe_team_assignment_mode:{team_mode}"
     for row in rows:
         if not row.get("player_name_raw"):
@@ -872,7 +918,7 @@ def main() -> None:
                 pass
             time.sleep(1.0)
 
-            summary["see_more_clicks"] = click_all_expand_in_block(block)
+            click_understanding_button(block)\n            summary["see_more_clicks"] = click_all_expand_in_block(block)
             time.sleep(1.2)
 
             block_selection_debug = select_exact_points_market_block(page, teams)
