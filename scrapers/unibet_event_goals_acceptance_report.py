@@ -6,6 +6,9 @@ from pathlib import Path
 EXPECTED_BLOCK_LABELS = {
     "BUTEUR (PROLONGATIONS INCLUSES)",
     "BUTEUR",
+    "Nombre de Buts - Joueur - Match (Hors TAB)",
+    "Nombre de Buts - Joueur - Match",
+    "Nombre de Buts - Joueur",
 }
 
 
